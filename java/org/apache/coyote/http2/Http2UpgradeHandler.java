@@ -1558,6 +1558,11 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public ByteBuffer startRequestBodyFrame(int streamId, int payloadSize, boolean endOfStream) throws Http2Exception {
+        // --- CVE-2023-44487: Client is sending real data, clear the spam counter ---
+        rapidResetCounter.set(0);
+
+        Stream stream = getStream(streamId, true);
+
         // DATA frames reduce the overhead count ...
         reduceOverheadCount(FrameType.DATA);
 
@@ -1764,6 +1769,9 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void reset(int streamId, long errorCode) throws Http2Exception  {
+        // --- CVE-2023-44487: Track incoming reset frames ---
+        trackRapidReset();
+
         if (log.isDebugEnabled()) {
             log.debug(sm.getString("upgradeHandler.reset.receive", getConnectionId(), Integer.toString(streamId),
                     Long.toString(errorCode)));
@@ -2089,6 +2097,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         @Override
         public void expandPayload() {
             payload = ByteBuffer.allocate(payload.capacity() * 2);
+        }
+    }
+
+    // --- CVE-2023-44487 Rapid Reset Protection ---
+    private final java.util.concurrent.atomic.AtomicInteger rapidResetCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+
+    private void trackRapidReset() throws ConnectionException {
+        if (rapidResetCounter.incrementAndGet() > 100) {
+            closeConnection(new ConnectionException(
+                sm.getString("upgradeHandler.tooMuchOverhead", connectionId),
+                Http2Error.ENHANCE_YOUR_CALM));
         }
     }
 }
