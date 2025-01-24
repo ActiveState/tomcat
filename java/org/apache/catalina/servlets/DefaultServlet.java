@@ -627,7 +627,7 @@ public class DefaultServlet extends HttpServlet {
         }
 
         InputStream resourceInputStream = null;
-
+        File tempContentFile = null;
         try {
             // Append data specified in ranges to existing content for this
             // resource - create a temp. file on the local filesystem to
@@ -636,8 +636,8 @@ public class DefaultServlet extends HttpServlet {
             if (range == IGNORE) {
                 resourceInputStream = req.getInputStream();
             } else {
-                File contentFile = executePartialPut(req, range, path);
-                resourceInputStream = new FileInputStream(contentFile);
+                tempContentFile = executePartialPut(req, range, path);
+                resourceInputStream = new FileInputStream(tempContentFile);
             }
 
             if (resources.write(path, resourceInputStream, true)) {
@@ -656,6 +656,9 @@ public class DefaultServlet extends HttpServlet {
                 } catch (IOException ioe) {
                     // Ignore
                 }
+            }
+            if (tempContentFile != null) {
+                tempContentFile.delete();
             }
         }
     }
@@ -678,15 +681,8 @@ public class DefaultServlet extends HttpServlet {
         // Append data specified in ranges to existing content for this
         // resource - create a temp. file on the local filesystem to
         // perform this operation
-        File tempDir = (File) getServletContext().getAttribute
-            (ServletContext.TEMPDIR);
-        // Convert all '/' characters to '.' in resourcePath
-        String convertedResourcePath = path.replace('/', '.');
-        File contentFile = new File(tempDir, convertedResourcePath);
-        if (contentFile.createNewFile()) {
-            // Clean up contentFile when Tomcat is terminated
-            contentFile.deleteOnExit();
-        }
+        File tempDir = (File) getServletContext().getAttribute(ServletContext.TEMPDIR);
+        File contentFile = File.createTempFile("put-part-", null, tempDir);
 
         try (RandomAccessFile randAccessContentFile =
             new RandomAccessFile(contentFile, "rw")) {
