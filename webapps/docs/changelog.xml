@@ -104,7 +104,189 @@
   They eventually become mixed with the numbered issues (i.e., numbered
   issues do not "pop up" wrt. others).
 -->
-<section name="Tomcat 10.1.35 (schultz)" rtext="in development">
+<section name="Tomcat 10.1.40 (schultz)" rtext="in development">
+  <subsection name="Catalina">
+    <changelog>
+      <fix>
+        Return 400 if the amount of content sent for a partial PUT is
+        inconsistent with the range that was specified. (remm)
+      </fix>
+      <add>
+        Add a new <code>RateLimiter</code> implementation,
+        <code>org.apache.catalina.util.ExactRateLimiter</code>, that can be used
+        with <code>org.apache.catalina.filters.RateLimitFilter</code> to provide
+        rate limit based on the exact values configured. Based on pull request
+        <pr>794</pr> by Chenjp. (markt)
+      </add>
+      <fix>
+        Fix parsing of the <code>time-taken</code> token in the
+        <code>ExtendedAccessLogValve</code>. (remm)
+      </fix>
+    </changelog>
+  </subsection>
+  <subsection name="Coyote">
+    <changelog>
+      <fix>
+        <bug>69607</bug>: Allow failed initialization of MD5. Based on code
+        submitted by Shivam Verma. (remm)
+      </fix>
+      <fix>
+        <bug>69614</bug>: HTTP/2 priority frames with an invalid priority field
+        value should be ignored. (markt)
+      </fix>
+    </changelog>
+  </subsection>
+</section>
+<section name="Tomcat 10.1.39 (schultz)" rtext="2025-03-07">
+</section>
+<section name="Tomcat 10.1.38 (schultz)" rtext="not released">
+  <subsection name="Catalina">
+    <changelog>
+      <fix>
+        <bug>69602</bug>: Fix regression in releases from 12-2024 that were too
+        strict and rejected weak etags in the <code>If-Range</code> header with
+        a 400 response. Instead will consider it as a failed match since strong
+        etags are required for <code>If-Range</code>. (remm)
+      </fix>
+    </changelog>
+  </subsection>
+  <subsection name="Jasper">
+    <changelog>
+      <scode>
+        Replace custom URL encoding provided by the JSP runtime library with
+        calls to <code>java.net.URLEncoder.encode()</code>. (markt)
+      </scode>
+    </changelog>
+  </subsection>
+  <subsection name="Web applications">
+    <changelog>
+      <add>
+        Documentation. Add a link to the Log4j documentation that describes how
+        to use Log4j rather than JULI for Tomcat's internal logging. (markt)
+      </add>
+    </changelog>
+  </subsection>
+  <subsection name="Other">
+    <changelog>
+      <update>
+        Revert JSign to 6.0 to avoid a file locking issue. (markt)
+      </update>
+    </changelog>
+  </subsection>
+</section>
+<section name="Tomcat 10.1.37 (schultz)" rtext="not released">
+  <subsection name="Catalina">
+    <changelog>
+      <fix>
+        When looking up class loader resources by resource name, the resource
+        name should not start with '/'. If the resource name does start with
+        '/', Tomcat is lenient and looks it up as if the '/' was not present.
+        When the web application class loader was configured with external
+        repositories and names starting with '/' were used for lookups, it was
+        possible that cached 'not found' results could effectively hide lookup
+        results using the correct resource name. (markt)
+      </fix>
+      <fix>
+        Enable the JNDIRealm to validate credentials provided to
+        <code>HttpServletRequest.login(String username, String password)</code>
+        when the realm is configured to use GSSAPI authentication. (markt)
+      </fix>
+      <fix>
+        Fix a bug in the JRE compatibility detection that incorrectly identified
+        Java 19 and Java 20 as supporting Java 21 features. (markt)
+      </fix>
+      <fix>
+        Improve the checks for exposure to and protection against CVE-2024-56337
+        so that reflection is not used unless required. The checks for whether
+        the file system is case sensitive or not have been removed. (markt)
+      </fix>
+      <add>
+        Add support for logging the connection ID (as returned by
+        <code>ServletRequest.getServletConnection().getConnectionId()</code>)
+        with the <code>AccessLogValve</code> and
+        <code>ExtendedAccessLogValve</code>. Based on pull request <pr>814</pr>
+        by Dmole. (markt)
+      </add>
+      <fix>
+        Avoid scenarios where temporary files used for partial PUT would not
+        be deleted. (remm)
+      </fix>
+    </changelog>
+  </subsection>
+  <subsection name="Coyote">
+    <changelog>
+      <fix>
+        <bug>69575</bug>: Avoid using compression if a response is already
+        compressed using <code>compress</code>, <code>deflate</code> or
+        <code>zstd</code>. (remm)
+      </fix>
+      <update>
+        Use <code>Transfer-Encoding</code> for compression rather than
+        <code>Content-Encoding</code> if the client submits a <code>TE</code>
+        header containing <code>gzip</code>. (remm)
+      </update>
+      <fix>
+        Fix a race condition in the handling of HTTP/2 stream reset that could
+        cause unexpected 500 responses. (markt)
+      </fix>
+    </changelog>
+  </subsection>
+  <subsection name="Cluster">
+    <changelog>
+      <add>
+        <bug>69598</bug>: Add detection of service account token changes to the
+        <code>KubernetesMembershipProvider</code> implementation and reload the
+        token if it changes. Based on a patch by Miroslav Jezbera. (markt)
+      </add>
+    </changelog>
+  </subsection>
+  <subsection name="Other">
+    <changelog>
+      <add>
+        Add <code>makensis</code> as an option for building the Installer for
+        Windows on non-Windows platforms. (rjung/markt)
+      </add>
+      <update>
+        Update Byte Buddy to 1.17.1. (markt)
+      </update>
+      <update>
+        Update Checkstyle to 10.21.3. (markt)
+      </update>
+      <update>
+        Update SpotBugs to 4.9.1. (markt)
+      </update>
+      <update>
+        Update JSign to 7.1. (markt)
+      </update>
+      <add>
+        Improvements to French translations. (remm)
+      </add>
+      <add>
+        Improvements to Japanese translations by tak7iji. (markt)
+      </add>
+    </changelog>
+  </subsection>
+</section>
+<section name="Tomcat 10.1.36 (schultz)" rtext="2025-02-18">
+  <subsection name="Catalina">
+    <changelog>
+      <fix>
+        <bug>69576</bug>: Avoid possible failure initializing
+        <code>JreCompat</code> due to uncaught exception introduced for the
+        check for CVE-2024-56337. (remm)
+      </fix>
+    </changelog>
+  </subsection>
+  <subsection name="Other">
+    <changelog>
+      <add>
+        Add <code>org.apache.juli.JsonFormatter</code> to format log as one
+        line JSON documents. (remm)
+      </add>
+    </changelog>
+  </subsection>
+</section>
+<section name="Tomcat 10.1.35 (schultz)" rtext="2025-02-10">
   <subsection name="Catalina">
     <changelog>
       <update>
@@ -123,6 +305,11 @@
         attribute value will also be used by the default and WebDAV Servlets.
         (remm)
       </update>
+      <fix>
+        <bug>69285</bug>: Optimise the creation of the parameter map for
+        included requests. Based on sample code and test cases provided by John
+        Engebretson. (markt)
+      </fix>
       <fix>
         <bug>69527</bug>: Avoid rare cases where a cached resource could be set
         with 0 content length, or could be evicted immediately. (remm)
@@ -210,10 +397,23 @@
         Add a new Connector configuration attribute,
         <code>encodedReverseSolidusHandling</code>, to control how
         <code>%5c</code> sequences in URLs are handled. The default behaviour is
-        unchanged (decode) keeping mind mind that the
-        <strong>allowBackslash</strong> attributes determines how the decoded
+        unchanged (decode) keeping in mind that the
+        <strong>allowBackslash</strong> attribute determines how the decoded
         URI is processed. (markt)
       </add>
+      <fix>
+        <bug>69545</bug>: Improve CRLF skipping for the <code>available</code>
+        method of the <code>ChunkedInputFilter</code>. (remm)
+      </fix>
+      <fix>
+        Improve the performance of repeated calls to <code>getHeader()</code>.
+        Pull request <pr>813</pr> provided by Adwait Kumar Singh. (markt)
+      </fix>
+      <fix>
+        <bug>69559</bug>: Ensure that the Java 24 warning regarding the use of
+        <code> sun.misc.Unsafe::invokeCleaner</code> is only reported by the JRE
+        when the code will be used. (markt)
+      </fix>
     </changelog>
   </subsection>
   <subsection name="Jasper">
@@ -234,6 +434,11 @@
         characters in an EL identifier as defined by the Java Language
         Specification. (markt)
       </fix>
+      <fix>
+        <bug>69532</bug>: Optimise the creation of
+        <code>ExpressionFactory</code> instances. Patch provided by John
+        Engebretson. (markt)
+      </fix>
     </changelog>
   </subsection>
   <subsection name="Web applications">
@@ -244,6 +449,11 @@
         <code>mapperDirectoryRedirectEnabled</code> to <code>true</code>.
         (markt)
       </add>
+      <fix>
+        Documentation. Better document the default for the
+        <code>truststoreProvider</code> attribute of a
+        <code>SSLHostConfig</code> element. (markt)
+      </fix>
     </changelog>
   </subsection>
   <subsection name="Other">
@@ -255,6 +465,30 @@
         Update the packaged version of the Tomcat Migration Tool for Jakarta EE
         to 1.0.9. (markt)
       </update>
+      <update>
+        Update the internal fork of Commons Pool to 2.12.1. (markt)
+      </update>
+      <update>
+        Update Byte Buddy to 1.16.1. (markt)
+      </update>
+      <update>
+        Update UnboundID to 7.0.2. (markt)
+      </update>
+      <update>
+        Update Checkstyle to 10.21.2. (markt)
+      </update>
+      <update>
+        Update SpotBugs to 4.9.0. (markt)
+      </update>
+      <add>
+        Improvements to French translations. (remm)
+      </add>
+      <add>
+        Improvements to Chinese translations by leeyazhou. (markt)
+      </add>
+      <add>
+        Improvements to Japanese translations by tak7iji. (markt)
+      </add>
     </changelog>
   </subsection>
 </section>
