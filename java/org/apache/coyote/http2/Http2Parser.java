@@ -471,15 +471,25 @@ class Http2Parser {
 
         ByteArrayInputStream bais = new ByteArrayInputStream(payload, 4, payloadSize - 4);
         Reader r = new BufferedReader(new InputStreamReader(bais, StandardCharsets.US_ASCII));
-        Priority p = Priority.parsePriority(r);
 
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("http2Parser.processFramePriorityUpdate.debug", connectionId,
-                    Integer.toString(prioritizedStreamID), Integer.toString(p.getUrgency()),
-                    Boolean.valueOf(p.getIncremental())));
+        try {
+            Priority p = Priority.parsePriority(r);
+
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("http2Parser.processFramePriorityUpdate.debug", connectionId,
+                        Integer.toString(prioritizedStreamID), Integer.toString(p.getUrgency()),
+                        Boolean.valueOf(p.getIncremental())));
+            }
+
+            output.priorityUpdate(prioritizedStreamID, p);
+        } catch (IllegalArgumentException iae) {
+            // CVE-2025-31650: malformed priority field values must be ignored,
+            // not left to propagate and leak a partially-initialized request.
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("http2Parser.processFramePriorityUpdate.invalid", connectionId,
+                        Integer.toString(prioritizedStreamID)), iae);
+            }
         }
-
-        output.priorityUpdate(prioritizedStreamID, p);
     }
 
 
