@@ -444,6 +444,15 @@ class Stream extends AbstractNonZeroStream implements HeaderEmitter {
                     setIncremental(p.getIncremental());
                 } catch (IOException ioe) {
                     // Not possible with StringReader
+                } catch (IllegalArgumentException iae) {
+                    // CVE-2025-31650: a malformed "priority" request header threw here
+                    // uncaught, leaking a partially-initialized request per occurrence
+                    // (OutOfMemoryError DoS). Invalid priority header field values should
+                    // be ignored instead.
+                    if (log.isTraceEnabled()) {
+                        log.trace(sm.getString("http2Parser.processFramePriorityUpdate.invalid", getConnectionId(),
+                                getIdAsString()), iae);
+                    }
                 }
                 break;
             }
