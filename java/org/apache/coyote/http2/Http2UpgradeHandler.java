@@ -47,6 +47,7 @@ import org.apache.coyote.http2.Http2Parser.Input;
 import org.apache.coyote.http2.Http2Parser.Output;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
+import org.apache.tomcat.util.ExceptionUtils;
 import org.apache.tomcat.util.codec.binary.Base64;
 import org.apache.tomcat.util.http.MimeHeaders;
 import org.apache.tomcat.util.http.parser.Priority;
@@ -442,6 +443,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             if (log.isDebugEnabled()) {
                 log.debug(sm.getString("upgradeHandler.ioerror", connectionId), ioe);
             }
+            close();
+        } catch (Throwable t) {
+            // CVE-2025-31650 (part 3/3): catch-all so an unexpected error elsewhere in
+            // HTTP/2 frame processing closes the connection and frees its resources,
+            // rather than leaving it dangling on error paths not covered by the
+            // IllegalArgumentException catches added in parts 1/3 and 2/3.
+            ExceptionUtils.handleThrowable(t);
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("upgradeHandler.throwable", connectionId), t);
+            }
+            // Unexpected errors close the connection.
             close();
         }
 
