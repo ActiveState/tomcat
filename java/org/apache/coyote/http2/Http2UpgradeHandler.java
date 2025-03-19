@@ -20,6 +20,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -46,7 +47,7 @@ import org.apache.coyote.http2.Http2Parser.Input;
 import org.apache.coyote.http2.Http2Parser.Output;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
-import org.apache.tomcat.util.codec.binary.Base64;
+import org.apache.tomcat.util.ExceptionUtils;
 import org.apache.tomcat.util.http.MimeHeaders;
 import org.apache.tomcat.util.http.parser.Priority;
 import org.apache.tomcat.util.log.UserDataHelper;
@@ -87,7 +88,9 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     private static final String HTTP2_SETTINGS_HEADER = "HTTP2-Settings";
 
-    private static final HeaderSink HEADER_SINK = new HeaderSink();
+    protected static final HeaderSink HEADER_SINK = new HeaderSink();
+
+    protected static final UserDataHelper userDataHelper = new UserDataHelper(log);
 
     protected final String connectionId;
 
@@ -99,7 +102,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     private volatile Http2Parser parser;
 
     // Simple state machine (sequence of states)
-    private AtomicReference<ConnectionState> connectionState = new AtomicReference<>(ConnectionState.NEW);
+    private final AtomicReference<ConnectionState> connectionState = new AtomicReference<>(ConnectionState.NEW);
     private volatile long pausedNanoTime = Long.MAX_VALUE;
 
     /**
@@ -118,8 +121,6 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     private final ConcurrentNavigableMap<Integer,AbstractNonZeroStream> streams = new ConcurrentSkipListMap<>();
     protected final AtomicInteger activeRemoteStreamCount = new AtomicInteger(0);
-    // Start at -1 so the 'add 2' logic in closeIdleStreams() works
-    private volatile int maxActiveRemoteStreamId = -1;
     private volatile int maxProcessedStreamId;
     private final AtomicInteger nextLocalStreamId = new AtomicInteger(2);
     private final PingManager pingManager = getPingManager();
@@ -139,8 +140,6 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     private volatile int lastNonFinalDataPayload;
     private volatile int lastWindowUpdate;
 
-    protected final UserDataHelper userDataHelper = new UserDataHelper(log);
-
 
     Http2UpgradeHandler(Http2Protocol protocol, Adapter adapter, Request coyoteRequest) {
         super(STREAM_ID_ZERO);
@@ -154,7 +153,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // Over time the count should be a slowly decreasing negative number.
         // Therefore, the longer a connection is 'well-behaved', the greater
         // tolerance it will have for a period of 'bad' behaviour.
-        overheadCount = new AtomicLong(-10 * protocol.getOverheadCountFactor());
+        overheadCount = new AtomicLong(-10L * protocol.getOverheadCountFactor());
 
         lastNonFinalDataPayload = protocol.getOverheadDataThreshold() * 2;
         lastWindowUpdate = protocol.getOverheadWindowUpdateThreshold() * 2;
@@ -169,13 +168,12 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
         // Initial HTTP request becomes stream 1.
         if (coyoteRequest != null) {
-            if (log.isDebugEnabled()) {
-                log.debug(sm.getString("upgradeHandler.upgrade", connectionId));
+            if (log.isTraceEnabled()) {
+                log.trace(sm.getString("upgradeHandler.upgrade", connectionId));
             }
             Integer key = Integer.valueOf(1);
             Stream stream = new Stream(key, this, coyoteRequest);
             streams.put(key, stream);
-            maxActiveRemoteStreamId = 1;
             activeRemoteStreamCount.set(1);
             maxProcessedStreamId = 1;
         }
@@ -189,8 +187,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void init(WebConnection webConnection) {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.init", connectionId, connectionState.get()));
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.init", connectionId, connectionState.get()));
         }
 
         if (!connectionState.compareAndSet(ConnectionState.NEW, ConnectionState.CONNECTED)) {
@@ -218,7 +216,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 // Process the initial settings frame
                 stream = getStream(1, true);
                 String base64Settings = stream.getCoyoteRequest().getHeader(HTTP2_SETTINGS_HEADER);
-                byte[] settings = Base64.decodeBase64URLSafe(base64Settings);
+                byte[] settings = Base64.getUrlDecoder().decode(base64Settings);
 
                 // Settings are only valid on stream 0
                 FrameType.SETTINGS.check(0, settings.length);
@@ -252,8 +250,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             }
             throw new ProtocolException(msg);
         }
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.prefaceReceived", connectionId));
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.prefaceReceived", connectionId));
         }
 
         // Allow streams and connection to determine timeouts
@@ -288,6 +286,13 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
+    protected void decrementActiveRemoteStreamCount(Stream stream) {
+        if (stream != null) {
+            setConnectionTimeoutForStreamCount(stream.decrementAndGetActiveRemoteStreamCount());
+        }
+    }
+
+
     void processStreamOnContainerThread(StreamProcessor streamProcessor, SocketEvent event) {
         StreamRunnable streamRunnable = new StreamRunnable(streamProcessor, event);
         if (streamConcurrency == null) {
@@ -317,8 +322,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public SocketState upgradeDispatch(SocketEvent status) {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.upgradeDispatch.entry", connectionId, status));
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.upgradeDispatch.entry", connectionId, status));
         }
 
         // WebConnection is not used so passing null here is fine
@@ -435,10 +440,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 log.debug(sm.getString("upgradeHandler.ioerror", connectionId), ioe);
             }
             close();
+        } catch (Throwable t) {
+            ExceptionUtils.handleThrowable(t);
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("upgradeHandler.throwable", connectionId), t);
+            }
+            // Unexpected errors close the connection.
+            close();
         }
 
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.upgradeDispatch.exit", connectionId, result));
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.upgradeDispatch.exit", connectionId, result));
         }
         return result;
     }
@@ -498,8 +510,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void pause() {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.pause.entry", connectionId));
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.pause.entry", connectionId));
         }
 
         if (connectionState.compareAndSet(ConnectionState.CONNECTED, ConnectionState.PAUSING)) {
@@ -561,8 +573,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     void sendStreamReset(StreamStateMachine state, StreamException se) throws IOException {
 
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.rst.debug", connectionId, Integer.toString(se.getStreamId()),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.rst.debug", connectionId, Integer.toString(se.getStreamId()),
                     se.getError(), se.getMessage()));
         }
 
@@ -591,7 +603,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 boolean active = state.isActive();
                 state.sendReset();
                 if (active) {
-                    activeRemoteStreamCount.decrementAndGet();
+                    decrementActiveRemoteStreamCount(getStream(se.getStreamId()));
                 }
             }
             socketWrapper.write(true, rstFrame, 0, rstFrame.length);
@@ -680,7 +692,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         byte[] payloadLength = new byte[3];
         ByteUtil.setThreeBytes(payloadLength, 0, len);
 
-        socketWrapper.getLock().lock();
+        Lock lock = socketWrapper.getLock();
+        lock.lock();
         try {
             socketWrapper.write(true, payloadLength, 0, payloadLength.length);
             socketWrapper.write(true, GOAWAY, 0, GOAWAY.length);
@@ -690,18 +703,19 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             }
             socketWrapper.flush(true);
         } finally {
-            socketWrapper.getLock().unlock();
+            lock.unlock();
         }
     }
 
     void writeHeaders(Stream stream, int pushedStreamId, MimeHeaders mimeHeaders, boolean endOfStream, int payloadSize)
             throws IOException {
         // This ensures the Stream processing thread has control of the socket.
-        socketWrapper.getLock().lock();
+        Lock lock = socketWrapper.getLock();
+        lock.lock();
         try {
             doWriteHeaders(stream, pushedStreamId, mimeHeaders, endOfStream, payloadSize);
         } finally {
-            socketWrapper.getLock().unlock();
+            lock.unlock();
         }
         stream.sentHeaders();
         if (endOfStream) {
@@ -717,12 +731,12 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     protected HeaderFrameBuffers doWriteHeaders(Stream stream, int pushedStreamId, MimeHeaders mimeHeaders,
             boolean endOfStream, int payloadSize) throws IOException {
 
-        if (log.isDebugEnabled()) {
+        if (log.isTraceEnabled()) {
             if (pushedStreamId == 0) {
-                log.debug(sm.getString("upgradeHandler.writeHeaders", connectionId, stream.getIdAsString(),
+                log.trace(sm.getString("upgradeHandler.writeHeaders", connectionId, stream.getIdAsString(),
                         Boolean.valueOf(endOfStream)));
             } else {
-                log.debug(sm.getString("upgradeHandler.writePushHeaders", connectionId, stream.getIdAsString(),
+                log.trace(sm.getString("upgradeHandler.writePushHeaders", connectionId, stream.getIdAsString(),
                         Integer.valueOf(pushedStreamId), Boolean.valueOf(endOfStream)));
             }
         }
@@ -767,8 +781,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 if (state == State.COMPLETE) {
                     headerFrameBuffers.getHeader()[4] += FLAG_END_OF_HEADERS;
                 }
-                if (log.isDebugEnabled()) {
-                    log.debug(headerFrameBuffers.getPayload().limit() + " bytes");
+                if (log.isTraceEnabled()) {
+                    log.trace(headerFrameBuffers.getPayload().limit() + " bytes");
                 }
                 ByteUtil.set31Bits(headerFrameBuffers.getHeader(), 5, stream.getIdAsInt());
                 headerFrameBuffers.endFrame();
@@ -796,8 +810,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     void writeBody(Stream stream, ByteBuffer data, int len, boolean finished) throws IOException {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.writeBody", connectionId, stream.getIdAsString(),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.writeBody", connectionId, stream.getIdAsString(),
                     Integer.toString(len), Boolean.valueOf(finished)));
         }
 
@@ -834,7 +848,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     protected void sentEndOfStream(Stream stream) {
         stream.sentEndOfStream();
         if (!stream.isActive()) {
-            setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
+            decrementActiveRemoteStreamCount(stream);
         }
     }
 
@@ -857,8 +871,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
      */
     void writeWindowUpdate(AbstractNonZeroStream stream, int increment, boolean applicationInitiated)
             throws IOException {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.windowUpdateConnection", getConnectionId(),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.windowUpdateConnection", getConnectionId(),
                     Integer.valueOf(increment)));
         }
         socketWrapper.getLock().lock();
@@ -874,8 +888,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             if (stream instanceof Stream && ((Stream) stream).canWrite()) {
                 int streamIncrement = ((Stream) stream).getWindowUpdateSizeToWrite(increment);
                 if (streamIncrement > 0) {
-                    if (log.isDebugEnabled()) {
-                        log.debug(sm.getString("upgradeHandler.windowUpdateStream", getConnectionId(), getIdAsString(),
+                    if (log.isTraceEnabled()) {
+                        log.trace(sm.getString("upgradeHandler.windowUpdateStream", getConnectionId(), getIdAsString(),
                                 Integer.valueOf(streamIncrement)));
                     }
                     // Re-use buffer as connection update has already been written
@@ -904,7 +918,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     protected void processWrites() throws IOException {
-        socketWrapper.getLock().lock();
+        Lock lock = socketWrapper.getLock();
+        lock.lock();
         try {
             if (socketWrapper.flush(false)) {
                 socketWrapper.registerWriteInterest();
@@ -914,14 +929,19 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 pingManager.sendPing(false);
             }
         } finally {
-            socketWrapper.getLock().unlock();
+            lock.unlock();
         }
     }
 
 
+    /*
+     * Requesting an allocation from the connection window for the specified stream.
+     */
     int reserveWindowSize(Stream stream, int reservation, boolean block) throws IOException {
-        // Need to be holding the stream lock so releaseBacklog() can't notify
-        // this thread until after this thread enters wait()
+        /*
+         * Need to be holding the stream lock so releaseBacklog() can't notify this thread until after this thread
+         * enters wait().
+         */
         int allocation = 0;
         stream.windowAllocationLock.lock();
         try {
@@ -935,19 +955,35 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 }
                 long windowSize = getWindowSize();
                 if (stream.getConnectionAllocationMade() > 0) {
+                    // The stream is/was in the backlog and has been granted an allocation - use it.
                     allocation = stream.getConnectionAllocationMade();
                     stream.setConnectionAllocationMade(0);
                 } else if (windowSize < 1) {
-                    // Has this stream been granted an allocation
-                    if (stream.getConnectionAllocationMade() == 0) {
+                    /*
+                     * The connection window has no capacity. If the stream has not been granted an allocation, and the
+                     * stream was not already added to the backlog due to an partial reservation (see next else if
+                     * block) add it to the backlog so it can obtain an allocation when capacity is available.
+                     */
+                    if (stream.getConnectionAllocationMade() == 0 && stream.getConnectionAllocationRequested() == 0) {
                         stream.setConnectionAllocationRequested(reservation);
                         backLogSize += reservation;
                         backLogStreams.add(stream);
                     }
                 } else if (windowSize < reservation) {
+                    /*
+                     * The connection window has some capacity but not enough to fill this reservation. Allocate what
+                     * capacity is available and add the stream to the backlog so it can obtain a further allocation
+                     * when capacity is available.
+                     */
                     allocation = (int) windowSize;
                     decrementWindowSize(allocation);
+                    int reservationRemaining = reservation - allocation;
+                    stream.setConnectionAllocationRequested(reservationRemaining);
+                    backLogSize += reservationRemaining;
+                    backLogStreams.add(stream);
+
                 } else {
+                    // The connection window has sufficient capacity for this reservation. Allocate the full amount.
                     allocation = reservation;
                     decrementWindowSize(allocation);
                 }
@@ -978,7 +1014,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                                 msg = sm.getString("stream.writeTimeout");
                                 error = Http2Error.ENHANCE_YOUR_CALM;
                             } else {
-                                msg = sm.getString("stream.clientCancel");
+                                msg = sm.getString("upgradeHandler.clientCancel");
                                 error = Http2Error.STREAM_CLOSED;
                             }
                             // Close the stream
@@ -1026,8 +1062,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
         if (streamsToNotify != null) {
             for (AbstractStream stream : streamsToNotify) {
-                if (log.isDebugEnabled()) {
-                    log.debug(sm.getString("upgradeHandler.releaseBacklog", connectionId, stream.getIdAsString()));
+                if (log.isTraceEnabled()) {
+                    log.trace(sm.getString("upgradeHandler.releaseBacklog", connectionId, stream.getIdAsString()));
                 }
                 // There is never any O/P on stream zero but it is included in
                 // the backlog as it simplifies the code. Skip it if it appears
@@ -1164,27 +1200,22 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     private int allocate(AbstractStream stream, int allocation) {
         windowAllocationLock.lock();
         try {
-            if (log.isDebugEnabled()) {
-                log.debug(sm.getString("upgradeHandler.allocate.debug", getConnectionId(), stream.getIdAsString(),
+            if (log.isTraceEnabled()) {
+                log.trace(sm.getString("upgradeHandler.allocate.debug", getConnectionId(), stream.getIdAsString(),
                         Integer.toString(allocation)));
             }
 
             int leftToAllocate = allocation;
 
             if (stream.getConnectionAllocationRequested() > 0) {
-                int allocatedThisTime;
-                if (allocation >= stream.getConnectionAllocationRequested()) {
-                    allocatedThisTime = stream.getConnectionAllocationRequested();
-                } else {
-                    allocatedThisTime = allocation;
-                }
+                int allocatedThisTime = Math.min(allocation, stream.getConnectionAllocationRequested());
                 stream.setConnectionAllocationRequested(stream.getConnectionAllocationRequested() - allocatedThisTime);
                 stream.setConnectionAllocationMade(stream.getConnectionAllocationMade() + allocatedThisTime);
                 leftToAllocate = leftToAllocate - allocatedThisTime;
             }
 
-            if (log.isDebugEnabled()) {
-                log.debug(sm.getString("upgradeHandler.allocate.left", getConnectionId(), stream.getIdAsString(),
+            if (log.isTraceEnabled()) {
+                log.trace(sm.getString("upgradeHandler.allocate.left", getConnectionId(), stream.getIdAsString(),
                         Integer.toString(leftToAllocate)));
             }
 
@@ -1195,7 +1226,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    private Stream getStream(int streamId) {
+    Stream getStream(int streamId) {
         Integer key = Integer.valueOf(streamId);
         AbstractStream result = streams.get(key);
         if (result instanceof Stream) {
@@ -1307,8 +1338,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         }
 
         final int size = streams.size();
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.pruneStart", connectionId, Long.toString(max),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.pruneStart", connectionId, Long.toString(max),
                     Integer.toString(size)));
         }
 
@@ -1326,8 +1357,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             }
             streams.remove(stream.getIdentifier());
             toClose--;
-            if (log.isDebugEnabled()) {
-                log.debug(sm.getString("upgradeHandler.pruned", connectionId, stream.getIdAsString()));
+            if (log.isTraceEnabled()) {
+                log.trace(sm.getString("upgradeHandler.pruned", connectionId, stream.getIdAsString()));
             }
 
         }
@@ -1415,8 +1446,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     private void updateOverheadCount(FrameType frameType, int increment) {
         long newOverheadCount = overheadCount.addAndGet(increment);
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.overheadChange", connectionId, getIdAsString(), frameType.name(),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.overheadChange", connectionId, getIdAsString(), frameType.name(),
                     Long.valueOf(newOverheadCount)));
         }
     }
@@ -1434,7 +1465,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         int len = length;
         int pos = offset;
         boolean nextReadBlock = block;
-        int thisRead = 0;
+        int thisRead;
 
         while (len > 0) {
             // Blocking reads use the protocol level read timeout. Non-blocking
@@ -1517,10 +1548,10 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
         abstractNonZeroStream.checkState(FrameType.DATA);
         abstractNonZeroStream.receivedData(payloadSize);
-        ByteBuffer result = abstractNonZeroStream.getInputByteBuffer();
+        ByteBuffer result = abstractNonZeroStream.getInputByteBuffer(true);
 
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.startRequestBodyFrame.result", getConnectionId(),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.startRequestBodyFrame.result", getConnectionId(),
                     abstractNonZeroStream.getIdAsString(), result));
         }
 
@@ -1539,7 +1570,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             // the call to this method. This means the bytes read will have been
             // written to the original stream and, effectively, swallowed.
             // Therefore, need to notify that those bytes were swallowed here.
-            if (dataLength>0) {
+            if (dataLength > 0) {
                 onSwallowedDataFramePayload(streamId, dataLength);
             }
         }
@@ -1556,53 +1587,47 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     @Override
     public HeaderEmitter headersStart(int streamId, boolean headersEndStream) throws Http2Exception, IOException {
 
-        // Check the pause state before processing headers since the pause state
-        // determines if a new stream is created or if this stream is ignored.
-        checkPauseState();
+        Stream stream = getStream(streamId, false);
+        if (stream == null) {
+            // New stream
 
-        if (connectionState.get().isNewStreamAllowed()) {
-            Stream stream = getStream(streamId, false);
-            if (stream == null) {
-                stream = createRemoteStream(streamId);
-            }
-            if (streamId < maxActiveRemoteStreamId) {
-                throw new ConnectionException(sm.getString("upgradeHandler.stream.old", Integer.valueOf(streamId),
-                        Integer.valueOf(maxActiveRemoteStreamId)), Http2Error.PROTOCOL_ERROR);
-            }
-            stream.checkState(FrameType.HEADERS);
-            stream.receivedStartOfHeaders(headersEndStream);
-            closeIdleStreams(streamId);
-            return stream;
-        } else {
-            if (log.isDebugEnabled()) {
-                log.debug(sm.getString("upgradeHandler.noNewStreams", connectionId, Integer.toString(streamId)));
-            }
-            reduceOverheadCount(FrameType.HEADERS);
-            // Stateless so a static can be used to save on GC
-            return HEADER_SINK;
-        }
-    }
+            // Check the pause state before processing headers since the pause state
+            // determines if a new stream is created or if this stream is ignored.
+            checkPauseState();
 
-
-    private void closeIdleStreams(int newMaxActiveRemoteStreamId) {
-        final ConcurrentNavigableMap<Integer,AbstractNonZeroStream> subMap = streams.subMap(
-                Integer.valueOf(maxActiveRemoteStreamId), false, Integer.valueOf(newMaxActiveRemoteStreamId), false);
-        for (AbstractNonZeroStream stream : subMap.values()) {
-            if (stream instanceof Stream) {
-                ((Stream) stream).closeIfIdle();
+            if (connectionState.get().isNewStreamAllowed()) {
+                if (streamId > maxProcessedStreamId) {
+                    stream = createRemoteStream(streamId);
+                    activeRemoteStreamCount.incrementAndGet();
+                } else {
+                    // ID for new stream must always be greater than any previous stream
+                    throw new ConnectionException(sm.getString("upgradeHandler.stream.old", Integer.valueOf(streamId),
+                            Integer.valueOf(maxProcessedStreamId)), Http2Error.PROTOCOL_ERROR);
+                }
+            } else {
+                if (log.isTraceEnabled()) {
+                    log.trace(sm.getString("upgradeHandler.noNewStreams", connectionId, Integer.toString(streamId)));
+                }
+                reduceOverheadCount(FrameType.HEADERS);
+                // Stateless so a static can be used to save on GC
+                return HEADER_SINK;
             }
         }
-        maxActiveRemoteStreamId = newMaxActiveRemoteStreamId;
+
+        stream.checkState(FrameType.HEADERS);
+        stream.receivedStartOfHeaders(headersEndStream);
+        return stream;
     }
 
 
     /**
      * Unused - NO-OP.
      *
-     * @param streamId Unused
+     * @param streamId       Unused
      * @param parentStreamId Unused
-     * @param exclusive Unused
-     * @param weight Unused
+     * @param exclusive      Unused
+     * @param weight         Unused
+     *
      * @throws Http2Exception Never thrown
      *
      * @deprecated Unused. Will be removed in Tomcat 11 onwards.
@@ -1642,9 +1667,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             Stream stream = (Stream) abstractNonZeroStream;
             if (stream.isActive()) {
                 if (stream.receivedEndOfHeaders()) {
-
-                    if (localSettings.getMaxConcurrentStreams() < activeRemoteStreamCount.incrementAndGet()) {
-                        setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
+                    if (localSettings.getMaxConcurrentStreams() < activeRemoteStreamCount.get()) {
+                        decrementActiveRemoteStreamCount(stream);
                         // Ignoring maxConcurrentStreams increases the overhead count
                         increaseOverheadCount(FrameType.HEADERS);
                         throw new StreamException(
@@ -1659,10 +1683,10 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 }
             }
             /*
-             *  Need to process end of stream before calling processStreamOnContainerThread to avoid a race condition
-             *  where the container thread finishes before end of stream is processed, thinks the request hasn't been
-             *  fully read so issues a RST with error code 0 (NO_ERROR) to tell the client not to send the request body,
-             *  if any. This breaks tests and generates unnecessary RST messages for standard clients.
+             * Need to process end of stream before calling processStreamOnContainerThread to avoid a race condition
+             * where the container thread finishes before end of stream is processed, thinks the request hasn't been
+             * fully read so issues a RST with error code 0 (NO_ERROR) to tell the client not to send the request body,
+             * if any. This breaks tests and generates unnecessary RST messages for standard clients.
              */
             if (endOfStream) {
                 receivedEndOfStream(stream);
@@ -1688,7 +1712,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     private void receivedEndOfStream(Stream stream) throws ConnectionException {
         stream.receivedEndOfStream();
         if (!stream.isActive()) {
-            setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
+            decrementActiveRemoteStreamCount(stream);
         }
     }
 
@@ -1702,8 +1726,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void reset(int streamId, long errorCode) throws Http2Exception {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.reset.receive", getConnectionId(), Integer.toString(streamId),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.reset.receive", getConnectionId(), Integer.toString(streamId),
                     Long.toString(errorCode)));
         }
         increaseOverheadCount(FrameType.RST, getProtocol().getOverheadResetFactor());
@@ -1714,7 +1738,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             boolean active = stream.isActive();
             stream.receiveReset(errorCode);
             if (active) {
-                activeRemoteStreamCount.decrementAndGet();
+                decrementActiveRemoteStreamCount(stream);
             }
         }
     }
@@ -1787,8 +1811,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void goaway(int lastStreamId, long errorCode, String debugData) {
-        if (log.isDebugEnabled()) {
-            log.debug(sm.getString("upgradeHandler.goaway.debug", connectionId, Integer.toString(lastStreamId),
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("upgradeHandler.goaway.debug", connectionId, Integer.toString(lastStreamId),
                     Long.toHexString(errorCode), debugData));
         }
         close();
@@ -1858,9 +1882,23 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     void replaceStream(AbstractNonZeroStream original, AbstractNonZeroStream replacement) {
         AbstractNonZeroStream current = streams.get(original.getIdentifier());
-        // Only replace the stream if it currently uses the full implementation.
+        /*
+         * Only replace the Stream once. No point replacing one RecycledStream instance with another.
+         *
+         * This method is called from both StreamProcessor and Http2UpgradeHandler which may be operating on the Stream
+         * concurrently. It is therefore expected that there will be duplicate calls to this method - primarily
+         * triggered by stream errors when processing incoming frames.
+         */
         if (current instanceof Stream) {
+            if (log.isTraceEnabled()) {
+                log.trace(sm.getString("upgradeHandler.replace.first", getConnectionId(), original.getIdAsString()));
+            }
             streams.put(original.getIdentifier(), replacement);
+        } else {
+            if (log.isTraceEnabled()) {
+                log.trace(
+                        sm.getString("upgradeHandler.replace.duplicate", getConnectionId(), original.getIdAsString()));
+            }
         }
     }
 
@@ -1926,8 +1964,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                         // the queue to 3 entries to use for the rolling average.
                         roundTripTimes.poll();
                     }
-                    if (log.isDebugEnabled()) {
-                        log.debug(sm.getString("pingManager.roundTripTime", connectionId, Long.valueOf(roundTripTime)));
+                    if (log.isTraceEnabled()) {
+                        log.trace(sm.getString("pingManager.roundTripTime", connectionId, Long.valueOf(roundTripTime)));
                     }
                 }
 
