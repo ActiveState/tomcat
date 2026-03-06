@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.catalina.servlets;
+package java.org.apache.catalina.servlets;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
@@ -509,7 +509,7 @@ public class DefaultServlet extends HttpServlet {
 
 
     protected boolean isReadOnly() {
-        return readOnly || resources.isReadOnly();
+        return readOnly;
     }
 
 
@@ -2379,7 +2379,6 @@ public class DefaultServlet extends HttpServlet {
                 hasAsteriskValue = true;
                 if (headerCount > 1 || headerValues.hasMoreElements()) {
                     conditionSatisfied = false;
-                    break;
                 } else {
                     // asterisk '*' is the only field value.
                     // RFC9110: If the field value is "*", the condition is false if the origin server has a current
@@ -2387,8 +2386,8 @@ public class DefaultServlet extends HttpServlet {
                     if (resourceETag != null) {
                         conditionSatisfied = false;
                     }
-                    break;
                 }
+                break;
             } else {
                 // RFC 7232 requires weak comparison for If-None-Match headers
                 Boolean matched = EntityTag.compareEntityTag(new StringReader(headerValue), true, resourceETag);
@@ -2561,7 +2560,7 @@ public class DefaultServlet extends HttpServlet {
      */
     protected String generateETag(WebResource resource) {
         if (useStrongETags) {
-            return resource.getStrongETag();
+            return resource.getETag();
         } else {
             return resource.getETag();
         }
