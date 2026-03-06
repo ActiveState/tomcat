@@ -16,38 +16,17 @@
  */
 package org.apache.coyote.http2;
 
-import java.io.EOFException;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.Comparator;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Queue;
-import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentNavigableMap;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.ConcurrentSkipListSet;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.Lock;
-
-import javax.servlet.http.WebConnection;
-
 import org.apache.coyote.Adapter;
 import org.apache.coyote.ProtocolException;
 import org.apache.coyote.Request;
 import org.apache.coyote.http11.upgrade.InternalHttpUpgradeHandler;
 import org.apache.coyote.http2.HpackDecoder.HeaderEmitter;
-import org.apache.coyote.http2.HpackEncoder.State;
 import org.apache.coyote.http2.Http2Parser.Input;
 import org.apache.coyote.http2.Http2Parser.Output;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.ExceptionUtils;
+import org.apache.tomcat.util.codec.binary.Base64;
 import org.apache.tomcat.util.http.MimeHeaders;
 import org.apache.tomcat.util.http.parser.Priority;
 import org.apache.tomcat.util.log.UserDataHelper;
@@ -57,6 +36,21 @@ import org.apache.tomcat.util.net.SendfileState;
 import org.apache.tomcat.util.net.SocketEvent;
 import org.apache.tomcat.util.net.SocketWrapperBase;
 import org.apache.tomcat.util.res.StringManager;
+
+import javax.servlet.http.WebConnection;
+import java.io.EOFException;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
 
 /**
  * This represents an HTTP/2 connection from a client to Tomcat. It is designed on the basis that there will never be
@@ -68,13 +62,13 @@ import org.apache.tomcat.util.res.StringManager;
  * inside a TLS enabled Connector element in server.xml to enable HTTP/2 support.</li>
  * </ul>
  */
-class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeHandler, Input, Output {
+class Http2UpgradeHandler extends org.apache.coyote.http2.AbstractStream implements InternalHttpUpgradeHandler, Input, Output {
 
     protected static final Log log = LogFactory.getLog(Http2UpgradeHandler.class);
     protected static final StringManager sm = StringManager.getManager(Http2UpgradeHandler.class);
 
     private static final AtomicInteger connectionIdGenerator = new AtomicInteger(0);
-    private static final Integer STREAM_ID_ZERO = Integer.valueOf(0);
+    private static final Integer STREAM_ID_ZERO = 0;
 
     protected static final int FLAG_END_OF_STREAM = 1;
     protected static final int FLAG_END_OF_HEADERS = 4;
@@ -88,44 +82,44 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     private static final String HTTP2_SETTINGS_HEADER = "HTTP2-Settings";
 
-    protected static final HeaderSink HEADER_SINK = new HeaderSink();
-
-    protected static final UserDataHelper userDataHelper = new UserDataHelper(log);
+    private static final org.apache.coyote.http2.HeaderSink HEADER_SINK = new org.apache.coyote.http2.HeaderSink();
 
     protected final String connectionId;
 
-    protected final Http2Protocol protocol;
+    protected final org.apache.coyote.http2.Http2Protocol protocol;
     private final Adapter adapter;
     protected volatile SocketWrapperBase<?> socketWrapper;
     private volatile SSLSupport sslSupport;
 
-    private volatile Http2Parser parser;
+    private volatile org.apache.coyote.http2.Http2Parser parser;
 
     // Simple state machine (sequence of states)
-    private final AtomicReference<ConnectionState> connectionState = new AtomicReference<>(ConnectionState.NEW);
+    private AtomicReference<ConnectionState> connectionState = new AtomicReference<>(ConnectionState.NEW);
     private volatile long pausedNanoTime = Long.MAX_VALUE;
 
     /**
      * Remote settings are settings defined by the client and sent to Tomcat that Tomcat must use when communicating
      * with the client.
      */
-    private final ConnectionSettingsRemote remoteSettings;
+    private final org.apache.coyote.http2.ConnectionSettingsRemote remoteSettings;
     /**
      * Local settings are settings defined by Tomcat and sent to the client that the client must use when communicating
      * with Tomcat.
      */
-    protected final ConnectionSettingsLocal localSettings;
+    protected final org.apache.coyote.http2.ConnectionSettingsLocal localSettings;
 
-    private HpackDecoder hpackDecoder;
-    private HpackEncoder hpackEncoder;
+    private org.apache.coyote.http2.HpackDecoder hpackDecoder;
+    private org.apache.coyote.http2.HpackEncoder hpackEncoder;
 
-    private final ConcurrentNavigableMap<Integer,AbstractNonZeroStream> streams = new ConcurrentSkipListMap<>();
+    private final ConcurrentNavigableMap<Integer, org.apache.coyote.http2.AbstractNonZeroStream> streams = new ConcurrentSkipListMap<>();
     protected final AtomicInteger activeRemoteStreamCount = new AtomicInteger(0);
+    // Start at -1 so the 'add 2' logic in closeIdleStreams() works
+    private volatile int maxActiveRemoteStreamId = -1;
     private volatile int maxProcessedStreamId;
     private final AtomicInteger nextLocalStreamId = new AtomicInteger(2);
     private final PingManager pingManager = getPingManager();
     private volatile int newStreamsSinceLastPrune = 0;
-    private final Set<Stream> backLogStreams = new HashSet<>();
+    private final Set<org.apache.coyote.http2.Stream> backLogStreams = new HashSet<>();
     private long backLogSize = 0;
     // The time at which the connection will timeout unless data arrives before
     // then. -1 means no timeout.
@@ -133,15 +127,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     // Stream concurrency control
     private AtomicInteger streamConcurrency = null;
-    private Queue<StreamRunnable> queuedRunnable = null;
+    private Queue<org.apache.coyote.http2.StreamRunnable> queuedRunnable = null;
 
     // Track 'overhead' frames vs 'request/response' frames
     private final AtomicLong overheadCount;
     private volatile int lastNonFinalDataPayload;
     private volatile int lastWindowUpdate;
 
+    protected final UserDataHelper userDataHelper = new UserDataHelper(log);
 
-    Http2UpgradeHandler(Http2Protocol protocol, Adapter adapter, Request coyoteRequest) {
+
+    Http2UpgradeHandler(org.apache.coyote.http2.Http2Protocol protocol, Adapter adapter, Request coyoteRequest) {
         super(STREAM_ID_ZERO);
         this.protocol = protocol;
         this.adapter = adapter;
@@ -153,27 +149,28 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // Over time the count should be a slowly decreasing negative number.
         // Therefore, the longer a connection is 'well-behaved', the greater
         // tolerance it will have for a period of 'bad' behaviour.
-        overheadCount = new AtomicLong(-10L * protocol.getOverheadCountFactor());
+        overheadCount = new AtomicLong(-10 * protocol.getOverheadCountFactor());
 
         lastNonFinalDataPayload = protocol.getOverheadDataThreshold() * 2;
         lastWindowUpdate = protocol.getOverheadWindowUpdateThreshold() * 2;
 
-        remoteSettings = new ConnectionSettingsRemote(connectionId);
-        localSettings = new ConnectionSettingsLocal(connectionId);
+        remoteSettings = new org.apache.coyote.http2.ConnectionSettingsRemote(connectionId);
+        localSettings = new org.apache.coyote.http2.ConnectionSettingsLocal(connectionId);
 
-        localSettings.set(Setting.MAX_CONCURRENT_STREAMS, protocol.getMaxConcurrentStreams());
-        localSettings.set(Setting.INITIAL_WINDOW_SIZE, protocol.getInitialWindowSize());
+        localSettings.set(org.apache.coyote.http2.Setting.MAX_CONCURRENT_STREAMS, protocol.getMaxConcurrentStreams());
+        localSettings.set(org.apache.coyote.http2.Setting.INITIAL_WINDOW_SIZE, protocol.getInitialWindowSize());
 
         pingManager.initiateDisabled = protocol.getInitiatePingDisabled();
 
         // Initial HTTP request becomes stream 1.
         if (coyoteRequest != null) {
-            if (log.isTraceEnabled()) {
-                log.trace(sm.getString("upgradeHandler.upgrade", connectionId));
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("upgradeHandler.upgrade", connectionId));
             }
             Integer key = Integer.valueOf(1);
-            Stream stream = new Stream(key, this, coyoteRequest);
+            org.apache.coyote.http2.Stream stream = new org.apache.coyote.http2.Stream(key, this, coyoteRequest);
             streams.put(key, stream);
+            maxActiveRemoteStreamId = 1;
             activeRemoteStreamCount.set(1);
             maxProcessedStreamId = 1;
         }
@@ -187,8 +184,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void init(WebConnection webConnection) {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.init", connectionId, connectionState.get()));
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.init", connectionId, connectionState.get()));
         }
 
         if (!connectionState.compareAndSet(ConnectionState.NEW, ConnectionState.CONNECTED)) {
@@ -203,7 +200,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
         parser = getParser(connectionId);
 
-        Stream stream = null;
+        org.apache.coyote.http2.Stream stream = null;
 
         socketWrapper.setReadTimeout(protocol.getReadTimeout());
         socketWrapper.setWriteTimeout(protocol.getWriteTimeout());
@@ -216,22 +213,22 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 // Process the initial settings frame
                 stream = getStream(1, true);
                 String base64Settings = stream.getCoyoteRequest().getHeader(HTTP2_SETTINGS_HEADER);
-                byte[] settings = Base64.getUrlDecoder().decode(base64Settings);
+                byte[] settings = Base64.decodeBase64URLSafe(base64Settings);
 
                 // Settings are only valid on stream 0
-                FrameType.SETTINGS.check(0, settings.length);
+                org.apache.coyote.http2.FrameType.SETTINGS.check(0, settings.length);
 
                 for (int i = 0; i < settings.length % 6; i++) {
-                    int id = ByteUtil.getTwoBytes(settings, i * 6);
-                    long value = ByteUtil.getFourBytes(settings, (i * 6) + 2);
-                    Setting key = Setting.valueOf(id);
-                    if (key == Setting.UNKNOWN) {
+                    int id = org.apache.coyote.http2.ByteUtil.getTwoBytes(settings, i * 6);
+                    long value = org.apache.coyote.http2.ByteUtil.getFourBytes(settings, (i * 6) + 2);
+                    org.apache.coyote.http2.Setting key = org.apache.coyote.http2.Setting.valueOf(id);
+                    if (key == org.apache.coyote.http2.Setting.UNKNOWN) {
                         log.warn(sm.getString("connectionSettings.unknown", connectionId, Integer.toString(id),
                                 Long.toString(value)));
                     }
                     remoteSettings.set(key, value);
                 }
-            } catch (Http2Exception e) {
+            } catch (org.apache.coyote.http2.Http2Exception e) {
                 throw new ProtocolException(sm.getString("upgradeHandler.upgrade.fail", connectionId));
             }
         }
@@ -243,15 +240,15 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // send the response to the original request over HTTP/2.
         try {
             parser.readConnectionPreface(webConnection, stream);
-        } catch (Http2Exception e) {
+        } catch (org.apache.coyote.http2.Http2Exception e) {
             String msg = sm.getString("upgradeHandler.invalidPreface", connectionId);
             if (log.isDebugEnabled()) {
                 log.debug(msg, e);
             }
             throw new ProtocolException(msg);
         }
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.prefaceReceived", connectionId));
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.prefaceReceived", connectionId));
         }
 
         // Allow streams and connection to determine timeouts
@@ -261,7 +258,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         processConnection(webConnection, stream);
     }
 
-    protected void processConnection(WebConnection webConnection, Stream stream) {
+    protected void processConnection(WebConnection webConnection, org.apache.coyote.http2.Stream stream) {
         // Send a ping to get an idea of round trip time as early as possible
         try {
             pingManager.sendPing(true);
@@ -274,27 +271,20 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         }
     }
 
-    protected Http2Parser getParser(String connectionId) {
-        return new Http2Parser(connectionId, this, this);
+    protected org.apache.coyote.http2.Http2Parser getParser(String connectionId) {
+        return new org.apache.coyote.http2.Http2Parser(connectionId, this, this);
     }
 
 
-    protected void processStreamOnContainerThread(Stream stream) {
-        StreamProcessor streamProcessor = new StreamProcessor(this, stream, adapter, socketWrapper);
+    protected void processStreamOnContainerThread(org.apache.coyote.http2.Stream stream) {
+        org.apache.coyote.http2.StreamProcessor streamProcessor = new org.apache.coyote.http2.StreamProcessor(this, stream, adapter, socketWrapper);
         streamProcessor.setSslSupport(sslSupport);
         processStreamOnContainerThread(streamProcessor, SocketEvent.OPEN_READ);
     }
 
 
-    protected void decrementActiveRemoteStreamCount(Stream stream) {
-        if (stream != null) {
-            setConnectionTimeoutForStreamCount(stream.decrementAndGetActiveRemoteStreamCount());
-        }
-    }
-
-
-    void processStreamOnContainerThread(StreamProcessor streamProcessor, SocketEvent event) {
-        StreamRunnable streamRunnable = new StreamRunnable(streamProcessor, event);
+    void processStreamOnContainerThread(org.apache.coyote.http2.StreamProcessor streamProcessor, SocketEvent event) {
+        org.apache.coyote.http2.StreamRunnable streamRunnable = new org.apache.coyote.http2.StreamRunnable(streamProcessor, event);
         if (streamConcurrency == null) {
             socketWrapper.execute(streamRunnable);
         } else {
@@ -322,8 +312,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public SocketState upgradeDispatch(SocketEvent status) {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.upgradeDispatch.entry", connectionId, status));
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.upgradeDispatch.entry", connectionId, status));
         }
 
         // WebConnection is not used so passing null here is fine
@@ -353,7 +343,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                                 if (!parser.readFrame()) {
                                     break;
                                 }
-                            } catch (StreamException se) {
+                            } catch (org.apache.coyote.http2.StreamException se) {
                                 // Log the Stream error but not necessarily all of
                                 // them
                                 UserDataHelper.Mode logMode = userDataHelper.getNextMode();
@@ -373,7 +363,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                                 }
                                 // Stream errors are not fatal to the connection so
                                 // continue reading frames
-                                Stream stream = getStream(se.getStreamId(), false);
+                                org.apache.coyote.http2.Stream stream = getStream(se.getStreamId(), false);
                                 if (stream == null) {
                                     sendStreamReset(null, se);
                                 } else {
@@ -381,9 +371,9 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                                 }
                             } finally {
                                 if (isOverheadLimitExceeded()) {
-                                    throw new ConnectionException(
+                                    throw new org.apache.coyote.http2.ConnectionException(
                                             sm.getString("upgradeHandler.tooMuchOverhead", connectionId),
-                                            Http2Error.ENHANCE_YOUR_CALM);
+                                            org.apache.coyote.http2.Http2Error.ENHANCE_YOUR_CALM);
                                 }
                             }
                         }
@@ -397,7 +387,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                         // ...set a timeout on the connection
                         setConnectionTimeoutForStreamCount(activeRemoteStreamCount.get());
 
-                    } catch (Http2Exception ce) {
+                    } catch (org.apache.coyote.http2.Http2Exception ce) {
                         // Really ConnectionException
                         if (log.isDebugEnabled()) {
                             log.debug(sm.getString("upgradeHandler.connectionError"), ce);
@@ -449,8 +439,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             close();
         }
 
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.upgradeDispatch.exit", connectionId, result));
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.upgradeDispatch.exit", connectionId, result));
         }
         return result;
     }
@@ -493,32 +483,32 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    ConnectionSettingsRemote getRemoteSettings() {
+    org.apache.coyote.http2.ConnectionSettingsRemote getRemoteSettings() {
         return remoteSettings;
     }
 
 
-    ConnectionSettingsLocal getLocalSettings() {
+    org.apache.coyote.http2.ConnectionSettingsLocal getLocalSettings() {
         return localSettings;
     }
 
 
-    Http2Protocol getProtocol() {
+    org.apache.coyote.http2.Http2Protocol getProtocol() {
         return protocol;
     }
 
 
     @Override
     public void pause() {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.pause.entry", connectionId));
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.pause.entry", connectionId));
         }
 
         if (connectionState.compareAndSet(ConnectionState.CONNECTED, ConnectionState.PAUSING)) {
             pausedNanoTime = System.nanoTime();
 
             try {
-                writeGoAwayFrame((1 << 31) - 1, Http2Error.NO_ERROR.getCode(), null);
+                writeGoAwayFrame((1 << 31) - 1, org.apache.coyote.http2.Http2Error.NO_ERROR.getCode(), null);
             } catch (IOException ioe) {
                 // This is fatal for the connection. Ignore it here. There will be
                 // further attempts at I/O in upgradeDispatch() and it can better
@@ -538,7 +528,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         if (connectionState.get() == ConnectionState.PAUSING) {
             if (pausedNanoTime + pingManager.getRoundTripTimeNano() < System.nanoTime()) {
                 connectionState.compareAndSet(ConnectionState.PAUSING, ConnectionState.PAUSED);
-                writeGoAwayFrame(maxProcessedStreamId, Http2Error.NO_ERROR.getCode(), null);
+                writeGoAwayFrame(maxProcessedStreamId, org.apache.coyote.http2.Http2Error.NO_ERROR.getCode(), null);
             }
         }
     }
@@ -562,7 +552,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         }
         decreaseStreamConcurrency();
         if (getStreamConcurrency() < protocol.getMaxConcurrentStreamExecution()) {
-            StreamRunnable streamRunnable = queuedRunnable.poll();
+            org.apache.coyote.http2.StreamRunnable streamRunnable = queuedRunnable.poll();
             if (streamRunnable != null) {
                 increaseStreamConcurrency();
                 socketWrapper.execute(streamRunnable);
@@ -571,24 +561,24 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    void sendStreamReset(StreamStateMachine state, StreamException se) throws IOException {
+    void sendStreamReset(org.apache.coyote.http2.StreamStateMachine state, org.apache.coyote.http2.StreamException se) throws IOException {
 
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.rst.debug", connectionId, Integer.toString(se.getStreamId()),
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.rst.debug", connectionId, Integer.toString(se.getStreamId()),
                     se.getError(), se.getMessage()));
         }
 
         // Write a RST frame
         byte[] rstFrame = new byte[13];
         // Length
-        ByteUtil.setThreeBytes(rstFrame, 0, 4);
+        org.apache.coyote.http2.ByteUtil.setThreeBytes(rstFrame, 0, 4);
         // Type
-        rstFrame[3] = FrameType.RST.getIdByte();
+        rstFrame[3] = org.apache.coyote.http2.FrameType.RST.getIdByte();
         // No flags
         // Stream ID
-        ByteUtil.set31Bits(rstFrame, 5, se.getStreamId());
+        org.apache.coyote.http2.ByteUtil.set31Bits(rstFrame, 5, se.getStreamId());
         // Payload
-        ByteUtil.setFourBytes(rstFrame, 9, se.getError().getCode());
+        org.apache.coyote.http2.ByteUtil.setFourBytes(rstFrame, 9, se.getError().getCode());
 
         // Need to update state atomically with the sending of the RST
         // frame else other threads currently working with this stream
@@ -603,7 +593,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 boolean active = state.isActive();
                 state.sendReset();
                 if (active) {
-                    decrementActiveRemoteStreamCount(getStream(se.getStreamId()));
+                    activeRemoteStreamCount.decrementAndGet();
                 }
             }
             socketWrapper.write(true, rstFrame, 0, rstFrame.length);
@@ -614,11 +604,11 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    void closeConnection(Http2Exception ce) {
+    void closeConnection(org.apache.coyote.http2.Http2Exception ce) {
         long code;
         byte[] msg;
         if (ce == null) {
-            code = Http2Error.NO_ERROR.getCode();
+            code = org.apache.coyote.http2.Http2Error.NO_ERROR.getCode();
             msg = null;
         } else {
             code = ce.getError().getCode();
@@ -666,13 +656,13 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // Build a WINDOW_UPDATE frame if one is required. If not, create an
         // empty byte array.
         byte[] windowUpdateFrame;
-        int increment = protocol.getInitialWindowSize() - ConnectionSettingsBase.DEFAULT_INITIAL_WINDOW_SIZE;
+        int increment = protocol.getInitialWindowSize() - org.apache.coyote.http2.ConnectionSettingsBase.DEFAULT_INITIAL_WINDOW_SIZE;
         if (increment > 0) {
             // Build window update frame for stream 0
             windowUpdateFrame = new byte[13];
-            ByteUtil.setThreeBytes(windowUpdateFrame, 0, 4);
-            windowUpdateFrame[3] = FrameType.WINDOW_UPDATE.getIdByte();
-            ByteUtil.set31Bits(windowUpdateFrame, 9, increment);
+            org.apache.coyote.http2.ByteUtil.setThreeBytes(windowUpdateFrame, 0, 4);
+            windowUpdateFrame[3] = org.apache.coyote.http2.FrameType.WINDOW_UPDATE.getIdByte();
+            org.apache.coyote.http2.ByteUtil.set31Bits(windowUpdateFrame, 9, increment);
         } else {
             windowUpdateFrame = new byte[0];
         }
@@ -683,17 +673,16 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     protected void writeGoAwayFrame(int maxStreamId, long errorCode, byte[] debugMsg) throws IOException {
         byte[] fixedPayload = new byte[8];
-        ByteUtil.set31Bits(fixedPayload, 0, maxStreamId);
-        ByteUtil.setFourBytes(fixedPayload, 4, errorCode);
+        org.apache.coyote.http2.ByteUtil.set31Bits(fixedPayload, 0, maxStreamId);
+        org.apache.coyote.http2.ByteUtil.setFourBytes(fixedPayload, 4, errorCode);
         int len = 8;
         if (debugMsg != null) {
             len += debugMsg.length;
         }
         byte[] payloadLength = new byte[3];
-        ByteUtil.setThreeBytes(payloadLength, 0, len);
+        org.apache.coyote.http2.ByteUtil.setThreeBytes(payloadLength, 0, len);
 
-        Lock lock = socketWrapper.getLock();
-        lock.lock();
+        socketWrapper.getLock().lock();
         try {
             socketWrapper.write(true, payloadLength, 0, payloadLength.length);
             socketWrapper.write(true, GOAWAY, 0, GOAWAY.length);
@@ -703,19 +692,18 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             }
             socketWrapper.flush(true);
         } finally {
-            lock.unlock();
+            socketWrapper.getLock().unlock();
         }
     }
 
-    void writeHeaders(Stream stream, int pushedStreamId, MimeHeaders mimeHeaders, boolean endOfStream, int payloadSize)
+    void writeHeaders(org.apache.coyote.http2.Stream stream, int pushedStreamId, MimeHeaders mimeHeaders, boolean endOfStream, int payloadSize)
             throws IOException {
         // This ensures the Stream processing thread has control of the socket.
-        Lock lock = socketWrapper.getLock();
-        lock.lock();
+        socketWrapper.getLock().lock();
         try {
             doWriteHeaders(stream, pushedStreamId, mimeHeaders, endOfStream, payloadSize);
         } finally {
-            lock.unlock();
+            socketWrapper.getLock().unlock();
         }
         stream.sentHeaders();
         if (endOfStream) {
@@ -728,15 +716,15 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
      * Separate method to allow Http2AsyncUpgradeHandler to call this code without synchronizing on socketWrapper since
      * it doesn't need to.
      */
-    protected HeaderFrameBuffers doWriteHeaders(Stream stream, int pushedStreamId, MimeHeaders mimeHeaders,
-            boolean endOfStream, int payloadSize) throws IOException {
+    protected HeaderFrameBuffers doWriteHeaders(org.apache.coyote.http2.Stream stream, int pushedStreamId, MimeHeaders mimeHeaders,
+                                                boolean endOfStream, int payloadSize) throws IOException {
 
-        if (log.isTraceEnabled()) {
+        if (log.isDebugEnabled()) {
             if (pushedStreamId == 0) {
-                log.trace(sm.getString("upgradeHandler.writeHeaders", connectionId, stream.getIdAsString(),
+                log.debug(sm.getString("upgradeHandler.writeHeaders", connectionId, stream.getIdAsString(),
                         Boolean.valueOf(endOfStream)));
             } else {
-                log.trace(sm.getString("upgradeHandler.writePushHeaders", connectionId, stream.getIdAsString(),
+                log.debug(sm.getString("upgradeHandler.writePushHeaders", connectionId, stream.getIdAsString(),
                         Integer.valueOf(pushedStreamId), Boolean.valueOf(endOfStream)));
             }
         }
@@ -750,43 +738,43 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         byte[] pushedStreamIdBytes = null;
         if (pushedStreamId > 0) {
             pushedStreamIdBytes = new byte[4];
-            ByteUtil.set31Bits(pushedStreamIdBytes, 0, pushedStreamId);
+            org.apache.coyote.http2.ByteUtil.set31Bits(pushedStreamIdBytes, 0, pushedStreamId);
         }
 
         boolean first = true;
-        State state = null;
+        org.apache.coyote.http2.HpackEncoder.State state = null;
 
-        while (state != State.COMPLETE) {
+        while (state != org.apache.coyote.http2.HpackEncoder.State.COMPLETE) {
             headerFrameBuffers.startFrame();
             if (first && pushedStreamIdBytes != null) {
                 headerFrameBuffers.getPayload().put(pushedStreamIdBytes);
             }
             state = getHpackEncoder().encode(mimeHeaders, headerFrameBuffers.getPayload());
             headerFrameBuffers.getPayload().flip();
-            if (state == State.COMPLETE || headerFrameBuffers.getPayload().limit() > 0) {
-                ByteUtil.setThreeBytes(headerFrameBuffers.getHeader(), 0, headerFrameBuffers.getPayload().limit());
+            if (state == org.apache.coyote.http2.HpackEncoder.State.COMPLETE || headerFrameBuffers.getPayload().limit() > 0) {
+                org.apache.coyote.http2.ByteUtil.setThreeBytes(headerFrameBuffers.getHeader(), 0, headerFrameBuffers.getPayload().limit());
                 if (first) {
                     first = false;
                     if (pushedStreamIdBytes == null) {
-                        headerFrameBuffers.getHeader()[3] = FrameType.HEADERS.getIdByte();
+                        headerFrameBuffers.getHeader()[3] = org.apache.coyote.http2.FrameType.HEADERS.getIdByte();
                     } else {
-                        headerFrameBuffers.getHeader()[3] = FrameType.PUSH_PROMISE.getIdByte();
+                        headerFrameBuffers.getHeader()[3] = org.apache.coyote.http2.FrameType.PUSH_PROMISE.getIdByte();
                     }
                     if (endOfStream) {
                         headerFrameBuffers.getHeader()[4] = FLAG_END_OF_STREAM;
                     }
                 } else {
-                    headerFrameBuffers.getHeader()[3] = FrameType.CONTINUATION.getIdByte();
+                    headerFrameBuffers.getHeader()[3] = org.apache.coyote.http2.FrameType.CONTINUATION.getIdByte();
                 }
-                if (state == State.COMPLETE) {
+                if (state == org.apache.coyote.http2.HpackEncoder.State.COMPLETE) {
                     headerFrameBuffers.getHeader()[4] += FLAG_END_OF_HEADERS;
                 }
-                if (log.isTraceEnabled()) {
-                    log.trace(headerFrameBuffers.getPayload().limit() + " bytes");
+                if (log.isDebugEnabled()) {
+                    log.debug(headerFrameBuffers.getPayload().limit() + " bytes");
                 }
-                ByteUtil.set31Bits(headerFrameBuffers.getHeader(), 5, stream.getIdAsInt());
+                org.apache.coyote.http2.ByteUtil.set31Bits(headerFrameBuffers.getHeader(), 5, stream.getIdAsInt());
                 headerFrameBuffers.endFrame();
-            } else if (state == State.UNDERFLOW) {
+            } else if (state == org.apache.coyote.http2.HpackEncoder.State.UNDERFLOW) {
                 headerFrameBuffers.expandPayload();
             }
         }
@@ -799,9 +787,9 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    protected HpackEncoder getHpackEncoder() {
+    protected org.apache.coyote.http2.HpackEncoder getHpackEncoder() {
         if (hpackEncoder == null) {
-            hpackEncoder = new HpackEncoder();
+            hpackEncoder = new org.apache.coyote.http2.HpackEncoder();
         }
         // Ensure latest agreed table size is used
         hpackEncoder.setMaxTableSize(remoteSettings.getHeaderTableSize());
@@ -809,25 +797,25 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    void writeBody(Stream stream, ByteBuffer data, int len, boolean finished) throws IOException {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.writeBody", connectionId, stream.getIdAsString(),
+    void writeBody(org.apache.coyote.http2.Stream stream, ByteBuffer data, int len, boolean finished) throws IOException {
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.writeBody", connectionId, stream.getIdAsString(),
                     Integer.toString(len), Boolean.valueOf(finished)));
         }
 
-        reduceOverheadCount(FrameType.DATA);
+        reduceOverheadCount(org.apache.coyote.http2.FrameType.DATA);
 
         // Need to check this now since sending end of stream will change this.
         boolean writable = stream.canWrite();
         byte[] header = new byte[9];
-        ByteUtil.setThreeBytes(header, 0, len);
-        header[3] = FrameType.DATA.getIdByte();
+        org.apache.coyote.http2.ByteUtil.setThreeBytes(header, 0, len);
+        header[3] = org.apache.coyote.http2.FrameType.DATA.getIdByte();
         if (finished) {
             header[4] = FLAG_END_OF_STREAM;
             sentEndOfStream(stream);
         }
         if (writable) {
-            ByteUtil.set31Bits(header, 5, stream.getIdAsInt());
+            org.apache.coyote.http2.ByteUtil.set31Bits(header, 5, stream.getIdAsInt());
             socketWrapper.getLock().lock();
             try {
                 socketWrapper.write(true, header, 0, header.length);
@@ -845,10 +833,10 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    protected void sentEndOfStream(Stream stream) {
+    protected void sentEndOfStream(org.apache.coyote.http2.Stream stream) {
         stream.sentEndOfStream();
         if (!stream.isActive()) {
-            decrementActiveRemoteStreamCount(stream);
+            setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
         }
     }
 
@@ -869,32 +857,32 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     /*
      * Needs to know if this was application initiated since that affects the error handling.
      */
-    void writeWindowUpdate(AbstractNonZeroStream stream, int increment, boolean applicationInitiated)
+    void writeWindowUpdate(org.apache.coyote.http2.AbstractNonZeroStream stream, int increment, boolean applicationInitiated)
             throws IOException {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.windowUpdateConnection", getConnectionId(),
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.windowUpdateConnection", getConnectionId(),
                     Integer.valueOf(increment)));
         }
         socketWrapper.getLock().lock();
         try {
             // Build window update frame for stream 0
             byte[] frame = new byte[13];
-            ByteUtil.setThreeBytes(frame, 0, 4);
-            frame[3] = FrameType.WINDOW_UPDATE.getIdByte();
-            ByteUtil.set31Bits(frame, 9, increment);
+            org.apache.coyote.http2.ByteUtil.setThreeBytes(frame, 0, 4);
+            frame[3] = org.apache.coyote.http2.FrameType.WINDOW_UPDATE.getIdByte();
+            org.apache.coyote.http2.ByteUtil.set31Bits(frame, 9, increment);
             socketWrapper.write(true, frame, 0, frame.length);
             boolean needFlush = true;
             // No need to send update from closed stream
-            if (stream instanceof Stream && ((Stream) stream).canWrite()) {
-                int streamIncrement = ((Stream) stream).getWindowUpdateSizeToWrite(increment);
+            if (stream instanceof org.apache.coyote.http2.Stream && ((org.apache.coyote.http2.Stream) stream).canWrite()) {
+                int streamIncrement = ((org.apache.coyote.http2.Stream) stream).getWindowUpdateSizeToWrite(increment);
                 if (streamIncrement > 0) {
-                    if (log.isTraceEnabled()) {
-                        log.trace(sm.getString("upgradeHandler.windowUpdateStream", getConnectionId(), getIdAsString(),
+                    if (log.isDebugEnabled()) {
+                        log.debug(sm.getString("upgradeHandler.windowUpdateStream", getConnectionId(), getIdAsString(),
                                 Integer.valueOf(streamIncrement)));
                     }
                     // Re-use buffer as connection update has already been written
-                    ByteUtil.set31Bits(frame, 5, stream.getIdAsInt());
-                    ByteUtil.set31Bits(frame, 9, streamIncrement);
+                    org.apache.coyote.http2.ByteUtil.set31Bits(frame, 5, stream.getIdAsInt());
+                    org.apache.coyote.http2.ByteUtil.set31Bits(frame, 9, streamIncrement);
                     try {
                         socketWrapper.write(true, frame, 0, frame.length);
                         socketWrapper.flush(true);
@@ -918,8 +906,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     protected void processWrites() throws IOException {
-        Lock lock = socketWrapper.getLock();
-        lock.lock();
+        socketWrapper.getLock().lock();
         try {
             if (socketWrapper.flush(false)) {
                 socketWrapper.registerWriteInterest();
@@ -929,19 +916,14 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 pingManager.sendPing(false);
             }
         } finally {
-            lock.unlock();
+            socketWrapper.getLock().unlock();
         }
     }
 
 
-    /*
-     * Requesting an allocation from the connection window for the specified stream.
-     */
-    int reserveWindowSize(Stream stream, int reservation, boolean block) throws IOException {
-        /*
-         * Need to be holding the stream lock so releaseBacklog() can't notify this thread until after this thread
-         * enters wait().
-         */
+    int reserveWindowSize(org.apache.coyote.http2.Stream stream, int reservation, boolean block) throws IOException {
+        // Need to be holding the stream lock so releaseBacklog() can't notify
+        // this thread until after this thread enters wait()
         int allocation = 0;
         stream.windowAllocationLock.lock();
         try {
@@ -951,39 +933,23 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                     stream.doStreamCancel(
                             sm.getString("upgradeHandler.stream.notWritable", stream.getConnectionId(),
                                     stream.getIdAsString(), stream.state.getCurrentStateName()),
-                            Http2Error.STREAM_CLOSED);
+                            org.apache.coyote.http2.Http2Error.STREAM_CLOSED);
                 }
                 long windowSize = getWindowSize();
                 if (stream.getConnectionAllocationMade() > 0) {
-                    // The stream is/was in the backlog and has been granted an allocation - use it.
                     allocation = stream.getConnectionAllocationMade();
                     stream.setConnectionAllocationMade(0);
                 } else if (windowSize < 1) {
-                    /*
-                     * The connection window has no capacity. If the stream has not been granted an allocation, and the
-                     * stream was not already added to the backlog due to an partial reservation (see next else if
-                     * block) add it to the backlog so it can obtain an allocation when capacity is available.
-                     */
-                    if (stream.getConnectionAllocationMade() == 0 && stream.getConnectionAllocationRequested() == 0) {
+                    // Has this stream been granted an allocation
+                    if (stream.getConnectionAllocationMade() == 0) {
                         stream.setConnectionAllocationRequested(reservation);
                         backLogSize += reservation;
                         backLogStreams.add(stream);
                     }
                 } else if (windowSize < reservation) {
-                    /*
-                     * The connection window has some capacity but not enough to fill this reservation. Allocate what
-                     * capacity is available and add the stream to the backlog so it can obtain a further allocation
-                     * when capacity is available.
-                     */
                     allocation = (int) windowSize;
                     decrementWindowSize(allocation);
-                    int reservationRemaining = reservation - allocation;
-                    stream.setConnectionAllocationRequested(reservationRemaining);
-                    backLogSize += reservationRemaining;
-                    backLogStreams.add(stream);
-
                 } else {
-                    // The connection window has sufficient capacity for this reservation. Allocate the full amount.
                     allocation = reservation;
                     decrementWindowSize(allocation);
                 }
@@ -1001,7 +967,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                         // Has this stream been granted an allocation
                         if (stream.getConnectionAllocationMade() == 0) {
                             String msg;
-                            Http2Error error;
+                            org.apache.coyote.http2.Http2Error error;
                             if (stream.isActive()) {
                                 if (log.isDebugEnabled()) {
                                     log.debug(sm.getString("upgradeHandler.noAllocation", connectionId,
@@ -1012,10 +978,10 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                                 // closing the stream will raise an exception.
                                 close();
                                 msg = sm.getString("stream.writeTimeout");
-                                error = Http2Error.ENHANCE_YOUR_CALM;
+                                error = org.apache.coyote.http2.Http2Error.ENHANCE_YOUR_CALM;
                             } else {
-                                msg = sm.getString("upgradeHandler.clientCancel");
-                                error = Http2Error.STREAM_CLOSED;
+                                msg = sm.getString("stream.clientCancel");
+                                error = org.apache.coyote.http2.Http2Error.STREAM_CLOSED;
                             }
                             // Close the stream
                             // This thread is in application code so need
@@ -1043,8 +1009,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     @Override
-    protected void incrementWindowSize(int increment) throws Http2Exception {
-        Set<AbstractStream> streamsToNotify = null;
+    protected void incrementWindowSize(int increment) throws org.apache.coyote.http2.Http2Exception {
+        Set<org.apache.coyote.http2.AbstractStream> streamsToNotify = null;
 
         windowAllocationLock.lock();
         try {
@@ -1061,9 +1027,9 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         }
 
         if (streamsToNotify != null) {
-            for (AbstractStream stream : streamsToNotify) {
-                if (log.isTraceEnabled()) {
-                    log.trace(sm.getString("upgradeHandler.releaseBacklog", connectionId, stream.getIdAsString()));
+            for (org.apache.coyote.http2.AbstractStream stream : streamsToNotify) {
+                if (log.isDebugEnabled()) {
+                    log.debug(sm.getString("upgradeHandler.releaseBacklog", connectionId, stream.getIdAsString()));
                 }
                 // There is never any O/P on stream zero but it is included in
                 // the backlog as it simplifies the code. Skip it if it appears
@@ -1071,7 +1037,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 if (this == stream) {
                     continue;
                 }
-                ((Stream) stream).notifyConnection();
+                ((org.apache.coyote.http2.Stream) stream).notifyConnection();
             }
         }
     }
@@ -1085,18 +1051,18 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
      *
      * @return The result of the send file processing
      */
-    protected SendfileState processSendfile(SendfileData sendfileData) {
+    protected SendfileState processSendfile(org.apache.coyote.http2.SendfileData sendfileData) {
         return SendfileState.DONE;
     }
 
 
-    private Set<AbstractStream> releaseBackLog(int increment) throws Http2Exception {
+    private Set<org.apache.coyote.http2.AbstractStream> releaseBackLog(int increment) throws org.apache.coyote.http2.Http2Exception {
         windowAllocationLock.lock();
         try {
-            Set<AbstractStream> result = new HashSet<>();
+            Set<org.apache.coyote.http2.AbstractStream> result = new HashSet<>();
             if (backLogSize < increment) {
                 // Can clear the whole backlog
-                for (AbstractStream stream : backLogStreams) {
+                for (org.apache.coyote.http2.AbstractStream stream : backLogStreams) {
                     if (stream.getConnectionAllocationRequested() > 0) {
                         stream.setConnectionAllocationMade(stream.getConnectionAllocationRequested());
                         stream.setConnectionAllocationRequested(0);
@@ -1112,17 +1078,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             } else {
                 // Can't clear the whole backlog.
                 // Need streams in priority order
-                Set<Stream> orderedStreams = new ConcurrentSkipListSet<>(Comparator.comparingInt(Stream::getUrgency)
-                        .thenComparing(Stream::getIncremental).thenComparing(Stream::getIdAsInt));
+                Set<org.apache.coyote.http2.Stream> orderedStreams = new ConcurrentSkipListSet<>(Comparator.comparingInt(org.apache.coyote.http2.Stream::getUrgency)
+                        .thenComparing(org.apache.coyote.http2.Stream::getIncremental).thenComparing(org.apache.coyote.http2.Stream::getIdAsInt));
                 orderedStreams.addAll(backLogStreams);
 
                 // Iteration 1. Need to work out how much we can clear.
                 long urgencyWhereAllocationIsExhausted = 0;
                 long requestedAllocationForIncrementalStreams = 0;
                 int remaining = increment;
-                Iterator<Stream> orderedStreamsIterator = orderedStreams.iterator();
+                Iterator<org.apache.coyote.http2.Stream> orderedStreamsIterator = orderedStreams.iterator();
                 while (orderedStreamsIterator.hasNext()) {
-                    Stream s = orderedStreamsIterator.next();
+                    org.apache.coyote.http2.Stream s = orderedStreamsIterator.next();
                     if (urgencyWhereAllocationIsExhausted < s.getUrgency()) {
                         if (remaining < 1) {
                             break;
@@ -1146,7 +1112,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 remaining = increment;
                 orderedStreamsIterator = orderedStreams.iterator();
                 while (orderedStreamsIterator.hasNext()) {
-                    Stream s = orderedStreamsIterator.next();
+                    org.apache.coyote.http2.Stream s = orderedStreamsIterator.next();
                     if (s.getUrgency() < urgencyWhereAllocationIsExhausted) {
                         // Can fully allocate
                         remaining = allocate(s, remaining);
@@ -1197,25 +1163,30 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    private int allocate(AbstractStream stream, int allocation) {
+    private int allocate(org.apache.coyote.http2.AbstractStream stream, int allocation) {
         windowAllocationLock.lock();
         try {
-            if (log.isTraceEnabled()) {
-                log.trace(sm.getString("upgradeHandler.allocate.debug", getConnectionId(), stream.getIdAsString(),
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("upgradeHandler.allocate.debug", getConnectionId(), stream.getIdAsString(),
                         Integer.toString(allocation)));
             }
 
             int leftToAllocate = allocation;
 
             if (stream.getConnectionAllocationRequested() > 0) {
-                int allocatedThisTime = Math.min(allocation, stream.getConnectionAllocationRequested());
+                int allocatedThisTime;
+                if (allocation >= stream.getConnectionAllocationRequested()) {
+                    allocatedThisTime = stream.getConnectionAllocationRequested();
+                } else {
+                    allocatedThisTime = allocation;
+                }
                 stream.setConnectionAllocationRequested(stream.getConnectionAllocationRequested() - allocatedThisTime);
                 stream.setConnectionAllocationMade(stream.getConnectionAllocationMade() + allocatedThisTime);
                 leftToAllocate = leftToAllocate - allocatedThisTime;
             }
 
-            if (log.isTraceEnabled()) {
-                log.trace(sm.getString("upgradeHandler.allocate.left", getConnectionId(), stream.getIdAsString(),
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("upgradeHandler.allocate.left", getConnectionId(), stream.getIdAsString(),
                         Integer.toString(leftToAllocate)));
             }
 
@@ -1226,66 +1197,66 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    Stream getStream(int streamId) {
+    private org.apache.coyote.http2.Stream getStream(int streamId) {
         Integer key = Integer.valueOf(streamId);
-        AbstractStream result = streams.get(key);
-        if (result instanceof Stream) {
-            return (Stream) result;
+        org.apache.coyote.http2.AbstractStream result = streams.get(key);
+        if (result instanceof org.apache.coyote.http2.Stream) {
+            return (org.apache.coyote.http2.Stream) result;
         }
         return null;
     }
 
 
-    private Stream getStream(int streamId, boolean unknownIsError) throws ConnectionException {
-        Stream result = getStream(streamId);
+    private org.apache.coyote.http2.Stream getStream(int streamId, boolean unknownIsError) throws org.apache.coyote.http2.ConnectionException {
+        org.apache.coyote.http2.Stream result = getStream(streamId);
         if (result == null && unknownIsError) {
             // Stream has been closed and removed from the map
-            throw new ConnectionException(sm.getString("upgradeHandler.stream.closed", Integer.toString(streamId)),
-                    Http2Error.PROTOCOL_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("upgradeHandler.stream.closed", Integer.toString(streamId)),
+                    org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
         }
         return result;
     }
 
 
-    private AbstractNonZeroStream getAbstractNonZeroStream(int streamId) {
+    private org.apache.coyote.http2.AbstractNonZeroStream getAbstractNonZeroStream(int streamId) {
         Integer key = Integer.valueOf(streamId);
         return streams.get(key);
     }
 
 
-    private AbstractNonZeroStream getAbstractNonZeroStream(int streamId, boolean unknownIsError)
-            throws ConnectionException {
-        AbstractNonZeroStream result = getAbstractNonZeroStream(streamId);
+    private org.apache.coyote.http2.AbstractNonZeroStream getAbstractNonZeroStream(int streamId, boolean unknownIsError)
+            throws org.apache.coyote.http2.ConnectionException {
+        org.apache.coyote.http2.AbstractNonZeroStream result = getAbstractNonZeroStream(streamId);
         if (result == null && unknownIsError) {
             // Stream has been closed and removed from the map
-            throw new ConnectionException(sm.getString("upgradeHandler.stream.closed", Integer.toString(streamId)),
-                    Http2Error.PROTOCOL_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("upgradeHandler.stream.closed", Integer.toString(streamId)),
+                    org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
         }
         return result;
     }
 
 
-    private Stream createRemoteStream(int streamId) throws ConnectionException {
+    private org.apache.coyote.http2.Stream createRemoteStream(int streamId) throws org.apache.coyote.http2.ConnectionException {
         Integer key = Integer.valueOf(streamId);
 
         if (streamId % 2 != 1) {
-            throw new ConnectionException(sm.getString("upgradeHandler.stream.even", key), Http2Error.PROTOCOL_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("upgradeHandler.stream.even", key), org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
         }
 
         pruneClosedStreams(streamId);
 
-        Stream result = new Stream(key, this);
+        org.apache.coyote.http2.Stream result = new org.apache.coyote.http2.Stream(key, this);
         streams.put(key, result);
         return result;
     }
 
 
-    private Stream createLocalStream(Request request) {
+    private org.apache.coyote.http2.Stream createLocalStream(Request request) {
         int streamId = nextLocalStreamId.getAndAdd(2);
 
         Integer key = Integer.valueOf(streamId);
 
-        Stream result = new Stream(key, this, request);
+        org.apache.coyote.http2.Stream result = new org.apache.coyote.http2.Stream(key, this, request);
         streams.put(key, result);
         return result;
     }
@@ -1298,11 +1269,11 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             return;
         }
 
-        for (AbstractNonZeroStream stream : streams.values()) {
-            if (stream instanceof Stream) {
+        for (org.apache.coyote.http2.AbstractNonZeroStream stream : streams.values()) {
+            if (stream instanceof org.apache.coyote.http2.Stream) {
                 // The connection is closing. Close the associated streams as no
                 // longer required (also notifies any threads waiting for allocations).
-                ((Stream) stream).receiveReset(Http2Error.CANCEL.getCode());
+                ((org.apache.coyote.http2.Stream) stream).receiveReset(org.apache.coyote.http2.Http2Error.CANCEL.getCode());
             }
         }
         try {
@@ -1338,8 +1309,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         }
 
         final int size = streams.size();
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.pruneStart", connectionId, Long.toString(max),
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.pruneStart", connectionId, Long.toString(max),
                     Integer.toString(size)));
         }
 
@@ -1348,17 +1319,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // Need to try and prune some streams. Prune streams starting with the
         // oldest. Pruning stops as soon as enough streams have been pruned.
         // Iterator is in key order.
-        for (AbstractNonZeroStream stream : streams.values()) {
+        for (org.apache.coyote.http2.AbstractNonZeroStream stream : streams.values()) {
             if (toClose < 1) {
                 return;
             }
-            if (stream instanceof Stream && ((Stream) stream).isActive()) {
+            if (stream instanceof org.apache.coyote.http2.Stream && ((org.apache.coyote.http2.Stream) stream).isActive()) {
                 continue;
             }
             streams.remove(stream.getIdentifier());
             toClose--;
-            if (log.isTraceEnabled()) {
-                log.trace(sm.getString("upgradeHandler.pruned", connectionId, stream.getIdAsString()));
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("upgradeHandler.pruned", connectionId, stream.getIdAsString()));
             }
 
         }
@@ -1370,7 +1341,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    void push(Request request, Stream associatedStream) throws IOException {
+    void push(Request request, org.apache.coyote.http2.Stream associatedStream) throws IOException {
         if (localSettings.getMaxConcurrentStreams() < activeRemoteStreamCount.incrementAndGet()) {
             // If there are too many open streams, simply ignore the push
             // request.
@@ -1378,7 +1349,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             return;
         }
 
-        Stream pushStream;
+        org.apache.coyote.http2.Stream pushStream;
 
         /*
          * Uses SocketWrapper lock since PUSH_PROMISE frames have to be sent in order. Once the stream has been created
@@ -1389,7 +1360,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         try {
             pushStream = createLocalStream(request);
             writeHeaders(associatedStream, pushStream.getIdAsInt(), request.getMimeHeaders(), false,
-                    Constants.DEFAULT_HEADERS_FRAME_SIZE);
+                    org.apache.coyote.http2.Constants.DEFAULT_HEADERS_FRAME_SIZE);
         } finally {
             lock.unlock();
         }
@@ -1406,7 +1377,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    void reduceOverheadCount(FrameType frameType) {
+    void reduceOverheadCount(org.apache.coyote.http2.FrameType frameType) {
         // A non-overhead frame reduces the overhead count by
         // Http2Protocol.DEFAULT_OVERHEAD_REDUCTION_FACTOR. A simple browser
         // request is likely to have one non-overhead frame (HEADERS) and one
@@ -1414,12 +1385,12 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // count will reduce by 10 for each simple request.
         // Requests and responses with bodies will create additional
         // non-overhead frames, further reducing the overhead count.
-        updateOverheadCount(frameType, Http2Protocol.DEFAULT_OVERHEAD_REDUCTION_FACTOR);
+        updateOverheadCount(frameType, org.apache.coyote.http2.Http2Protocol.DEFAULT_OVERHEAD_REDUCTION_FACTOR);
     }
 
 
     @Override
-    public void increaseOverheadCount(FrameType frameType) {
+    public void increaseOverheadCount(org.apache.coyote.http2.FrameType frameType) {
         // An overhead frame increases the overhead count by
         // overheadCountFactor. By default, this means an overhead frame
         // increases the overhead count by 10. A simple browser request is
@@ -1430,7 +1401,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    private void increaseOverheadCount(FrameType frameType, int increment) {
+    private void increaseOverheadCount(org.apache.coyote.http2.FrameType frameType, int increment) {
         // Overhead frames that indicate inefficient (and potentially malicious)
         // use of small frames trigger an increase that is inversely
         // proportional to size. The default threshold for all three potential
@@ -1444,10 +1415,10 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    private void updateOverheadCount(FrameType frameType, int increment) {
+    private void updateOverheadCount(org.apache.coyote.http2.FrameType frameType, int increment) {
         long newOverheadCount = overheadCount.addAndGet(increment);
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.overheadChange", connectionId, getIdAsString(), frameType.name(),
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.overheadChange", connectionId, getIdAsString(), frameType.name(),
                     Long.valueOf(newOverheadCount)));
         }
     }
@@ -1465,7 +1436,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         int len = length;
         int pos = offset;
         boolean nextReadBlock = block;
-        int thisRead;
+        int thisRead = 0;
 
         while (len > 0) {
             // Blocking reads use the protocol level read timeout. Non-blocking
@@ -1511,18 +1482,18 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     // ---------------------------------------------- Http2Parser.Output methods
 
     @Override
-    public HpackDecoder getHpackDecoder() {
+    public org.apache.coyote.http2.HpackDecoder getHpackDecoder() {
         if (hpackDecoder == null) {
-            hpackDecoder = new HpackDecoder(localSettings.getHeaderTableSize());
+            hpackDecoder = new org.apache.coyote.http2.HpackDecoder(localSettings.getHeaderTableSize());
         }
         return hpackDecoder;
     }
 
 
     @Override
-    public ByteBuffer startRequestBodyFrame(int streamId, int payloadSize, boolean endOfStream) throws Http2Exception {
+    public ByteBuffer startRequestBodyFrame(int streamId, int payloadSize, boolean endOfStream) throws org.apache.coyote.http2.Http2Exception {
         // DATA frames reduce the overhead count ...
-        reduceOverheadCount(FrameType.DATA);
+        reduceOverheadCount(org.apache.coyote.http2.FrameType.DATA);
 
         // .. but lots of small payloads are inefficient so that will increase
         // the overhead count unless it is the final DATA frame where small
@@ -1541,17 +1512,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 average = 1;
             }
             if (average < overheadThreshold) {
-                increaseOverheadCount(FrameType.DATA, overheadThreshold / average);
+                increaseOverheadCount(org.apache.coyote.http2.FrameType.DATA, overheadThreshold / average);
             }
         }
 
-        AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
-        abstractNonZeroStream.checkState(FrameType.DATA);
+        org.apache.coyote.http2.AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
+        abstractNonZeroStream.checkState(org.apache.coyote.http2.FrameType.DATA);
         abstractNonZeroStream.receivedData(payloadSize);
-        ByteBuffer result = abstractNonZeroStream.getInputByteBuffer(true);
+        ByteBuffer result = abstractNonZeroStream.getInputByteBuffer();
 
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.startRequestBodyFrame.result", getConnectionId(),
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.startRequestBodyFrame.result", getConnectionId(),
                     abstractNonZeroStream.getIdAsString(), result));
         }
 
@@ -1560,17 +1531,17 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     @Override
-    public void endRequestBodyFrame(int streamId, int dataLength) throws Http2Exception, IOException {
-        AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
-        if (abstractNonZeroStream instanceof Stream) {
-            ((Stream) abstractNonZeroStream).getInputBuffer().onDataAvailable();
+    public void endRequestBodyFrame(int streamId, int dataLength) throws org.apache.coyote.http2.Http2Exception, IOException {
+        org.apache.coyote.http2.AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
+        if (abstractNonZeroStream instanceof org.apache.coyote.http2.Stream) {
+            ((org.apache.coyote.http2.Stream) abstractNonZeroStream).getInputBuffer().onDataAvailable();
         } else {
             // The Stream was recycled between the call in Http2Parser to
             // startRequestBodyFrame() and the synchronized block that contains
             // the call to this method. This means the bytes read will have been
             // written to the original stream and, effectively, swallowed.
             // Therefore, need to notify that those bytes were swallowed here.
-            if (dataLength > 0) {
+            if (dataLength>0) {
                 onSwallowedDataFramePayload(streamId, dataLength);
             }
         }
@@ -1579,61 +1550,67 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void onSwallowedDataFramePayload(int streamId, int swallowedDataBytesCount) throws IOException {
-        AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId);
+        org.apache.coyote.http2.AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId);
         writeWindowUpdate(abstractNonZeroStream, swallowedDataBytesCount, false);
     }
 
 
     @Override
-    public HeaderEmitter headersStart(int streamId, boolean headersEndStream) throws Http2Exception, IOException {
+    public HeaderEmitter headersStart(int streamId, boolean headersEndStream) throws org.apache.coyote.http2.Http2Exception, IOException {
 
-        Stream stream = getStream(streamId, false);
-        if (stream == null) {
-            // New stream
+        // Check the pause state before processing headers since the pause state
+        // determines if a new stream is created or if this stream is ignored.
+        checkPauseState();
 
-            // Check the pause state before processing headers since the pause state
-            // determines if a new stream is created or if this stream is ignored.
-            checkPauseState();
+        if (connectionState.get().isNewStreamAllowed()) {
+            org.apache.coyote.http2.Stream stream = getStream(streamId, false);
+            if (stream == null) {
+                stream = createRemoteStream(streamId);
+            }
+            if (streamId < maxActiveRemoteStreamId) {
+                throw new org.apache.coyote.http2.ConnectionException(sm.getString("upgradeHandler.stream.old", Integer.valueOf(streamId),
+                        Integer.valueOf(maxActiveRemoteStreamId)), org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
+            }
+            stream.checkState(org.apache.coyote.http2.FrameType.HEADERS);
+            stream.receivedStartOfHeaders(headersEndStream);
+            closeIdleStreams(streamId);
+            return stream;
+        } else {
+            if (log.isDebugEnabled()) {
+                log.debug(sm.getString("upgradeHandler.noNewStreams", connectionId, Integer.toString(streamId)));
+            }
+            reduceOverheadCount(org.apache.coyote.http2.FrameType.HEADERS);
+            // Stateless so a static can be used to save on GC
+            return HEADER_SINK;
+        }
+    }
 
-            if (connectionState.get().isNewStreamAllowed()) {
-                if (streamId > maxProcessedStreamId) {
-                    stream = createRemoteStream(streamId);
-                    activeRemoteStreamCount.incrementAndGet();
-                } else {
-                    // ID for new stream must always be greater than any previous stream
-                    throw new ConnectionException(sm.getString("upgradeHandler.stream.old", Integer.valueOf(streamId),
-                            Integer.valueOf(maxProcessedStreamId)), Http2Error.PROTOCOL_ERROR);
-                }
-            } else {
-                if (log.isTraceEnabled()) {
-                    log.trace(sm.getString("upgradeHandler.noNewStreams", connectionId, Integer.toString(streamId)));
-                }
-                reduceOverheadCount(FrameType.HEADERS);
-                // Stateless so a static can be used to save on GC
-                return HEADER_SINK;
+
+    private void closeIdleStreams(int newMaxActiveRemoteStreamId) {
+        final ConcurrentNavigableMap<Integer, org.apache.coyote.http2.AbstractNonZeroStream> subMap = streams.subMap(
+                Integer.valueOf(maxActiveRemoteStreamId), false, Integer.valueOf(newMaxActiveRemoteStreamId), false);
+        for (org.apache.coyote.http2.AbstractNonZeroStream stream : subMap.values()) {
+            if (stream instanceof org.apache.coyote.http2.Stream) {
+                ((org.apache.coyote.http2.Stream) stream).closeIfIdle();
             }
         }
-
-        stream.checkState(FrameType.HEADERS);
-        stream.receivedStartOfHeaders(headersEndStream);
-        return stream;
+        maxActiveRemoteStreamId = newMaxActiveRemoteStreamId;
     }
 
 
     /**
      * Unused - NO-OP.
      *
-     * @param streamId       Unused
+     * @param streamId Unused
      * @param parentStreamId Unused
-     * @param exclusive      Unused
-     * @param weight         Unused
-     *
+     * @param exclusive Unused
+     * @param weight Unused
      * @throws Http2Exception Never thrown
      *
      * @deprecated Unused. Will be removed in Tomcat 11 onwards.
      */
     @Deprecated
-    public void reprioritise(int streamId, int parentStreamId, boolean exclusive, int weight) throws Http2Exception {
+    public void reprioritise(int streamId, int parentStreamId, boolean exclusive, int weight) throws org.apache.coyote.http2.Http2Exception {
         // NO-OP
     }
 
@@ -1648,9 +1625,9 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             if (payloadSize < overheadThreshold) {
                 if (payloadSize == 0) {
                     // Avoid division by zero
-                    increaseOverheadCount(FrameType.HEADERS, overheadThreshold);
+                    increaseOverheadCount(org.apache.coyote.http2.FrameType.HEADERS, overheadThreshold);
                 } else {
-                    increaseOverheadCount(FrameType.HEADERS, overheadThreshold / payloadSize);
+                    increaseOverheadCount(org.apache.coyote.http2.FrameType.HEADERS, overheadThreshold / payloadSize);
                 }
             }
         }
@@ -1658,35 +1635,36 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     @Override
-    public void headersEnd(int streamId, boolean endOfStream) throws Http2Exception {
-        AbstractNonZeroStream abstractNonZeroStream =
+    public void headersEnd(int streamId, boolean endOfStream) throws org.apache.coyote.http2.Http2Exception {
+        org.apache.coyote.http2.AbstractNonZeroStream abstractNonZeroStream =
                 getAbstractNonZeroStream(streamId, connectionState.get().isNewStreamAllowed());
-        if (abstractNonZeroStream instanceof Stream) {
+        if (abstractNonZeroStream instanceof org.apache.coyote.http2.Stream) {
             boolean processStream = false;
             setMaxProcessedStream(streamId);
-            Stream stream = (Stream) abstractNonZeroStream;
+            org.apache.coyote.http2.Stream stream = (org.apache.coyote.http2.Stream) abstractNonZeroStream;
             if (stream.isActive()) {
                 if (stream.receivedEndOfHeaders()) {
-                    if (localSettings.getMaxConcurrentStreams() < activeRemoteStreamCount.get()) {
-                        decrementActiveRemoteStreamCount(stream);
+
+                    if (localSettings.getMaxConcurrentStreams() < activeRemoteStreamCount.incrementAndGet()) {
+                        setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
                         // Ignoring maxConcurrentStreams increases the overhead count
-                        increaseOverheadCount(FrameType.HEADERS);
-                        throw new StreamException(
+                        increaseOverheadCount(org.apache.coyote.http2.FrameType.HEADERS);
+                        throw new org.apache.coyote.http2.StreamException(
                                 sm.getString("upgradeHandler.tooManyRemoteStreams",
                                         Long.toString(localSettings.getMaxConcurrentStreams())),
-                                Http2Error.REFUSED_STREAM, streamId);
+                                org.apache.coyote.http2.Http2Error.REFUSED_STREAM, streamId);
                     }
                     // Valid new stream reduces the overhead count
-                    reduceOverheadCount(FrameType.HEADERS);
+                    reduceOverheadCount(org.apache.coyote.http2.FrameType.HEADERS);
 
                     processStream = true;
                 }
             }
             /*
-             * Need to process end of stream before calling processStreamOnContainerThread to avoid a race condition
-             * where the container thread finishes before end of stream is processed, thinks the request hasn't been
-             * fully read so issues a RST with error code 0 (NO_ERROR) to tell the client not to send the request body,
-             * if any. This breaks tests and generates unnecessary RST messages for standard clients.
+             *  Need to process end of stream before calling processStreamOnContainerThread to avoid a race condition
+             *  where the container thread finishes before end of stream is processed, thinks the request hasn't been
+             *  fully read so issues a RST with error code 0 (NO_ERROR) to tell the client not to send the request body,
+             *  if any. This breaks tests and generates unnecessary RST messages for standard clients.
              */
             if (endOfStream) {
                 receivedEndOfStream(stream);
@@ -1699,20 +1677,20 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     @Override
-    public void receivedEndOfStream(int streamId) throws ConnectionException {
-        AbstractNonZeroStream abstractNonZeroStream =
+    public void receivedEndOfStream(int streamId) throws org.apache.coyote.http2.ConnectionException {
+        org.apache.coyote.http2.AbstractNonZeroStream abstractNonZeroStream =
                 getAbstractNonZeroStream(streamId, connectionState.get().isNewStreamAllowed());
-        if (abstractNonZeroStream instanceof Stream) {
-            Stream stream = (Stream) abstractNonZeroStream;
+        if (abstractNonZeroStream instanceof org.apache.coyote.http2.Stream) {
+            org.apache.coyote.http2.Stream stream = (org.apache.coyote.http2.Stream) abstractNonZeroStream;
             receivedEndOfStream(stream);
         }
     }
 
 
-    private void receivedEndOfStream(Stream stream) throws ConnectionException {
+    private void receivedEndOfStream(org.apache.coyote.http2.Stream stream) throws org.apache.coyote.http2.ConnectionException {
         stream.receivedEndOfStream();
         if (!stream.isActive()) {
-            decrementActiveRemoteStreamCount(stream);
+            setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
         }
     }
 
@@ -1725,29 +1703,29 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     @Override
-    public void reset(int streamId, long errorCode) throws Http2Exception {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.reset.receive", getConnectionId(), Integer.toString(streamId),
+    public void reset(int streamId, long errorCode) throws org.apache.coyote.http2.Http2Exception {
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.reset.receive", getConnectionId(), Integer.toString(streamId),
                     Long.toString(errorCode)));
         }
-        increaseOverheadCount(FrameType.RST, getProtocol().getOverheadResetFactor());
-        AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
-        abstractNonZeroStream.checkState(FrameType.RST);
-        if (abstractNonZeroStream instanceof Stream) {
-            Stream stream = (Stream) abstractNonZeroStream;
+        increaseOverheadCount(org.apache.coyote.http2.FrameType.RST, getProtocol().getOverheadResetFactor());
+        org.apache.coyote.http2.AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
+        abstractNonZeroStream.checkState(org.apache.coyote.http2.FrameType.RST);
+        if (abstractNonZeroStream instanceof org.apache.coyote.http2.Stream) {
+            org.apache.coyote.http2.Stream stream = (org.apache.coyote.http2.Stream) abstractNonZeroStream;
             boolean active = stream.isActive();
             stream.receiveReset(errorCode);
             if (active) {
-                decrementActiveRemoteStreamCount(stream);
+                activeRemoteStreamCount.decrementAndGet();
             }
         }
     }
 
 
     @Override
-    public void setting(Setting setting, long value) throws ConnectionException {
+    public void setting(org.apache.coyote.http2.Setting setting, long value) throws org.apache.coyote.http2.ConnectionException {
 
-        increaseOverheadCount(FrameType.SETTINGS);
+        increaseOverheadCount(org.apache.coyote.http2.FrameType.SETTINGS);
 
         // Possible with empty settings frame
         if (setting == null) {
@@ -1755,25 +1733,25 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         }
 
         // Special handling required
-        if (setting == Setting.INITIAL_WINDOW_SIZE) {
+        if (setting == org.apache.coyote.http2.Setting.INITIAL_WINDOW_SIZE) {
             long oldValue = remoteSettings.getInitialWindowSize();
             // Do this first in case new value is invalid
             remoteSettings.set(setting, value);
             int diff = (int) (value - oldValue);
-            for (AbstractNonZeroStream stream : streams.values()) {
+            for (org.apache.coyote.http2.AbstractNonZeroStream stream : streams.values()) {
                 try {
                     stream.incrementWindowSize(diff);
-                } catch (Http2Exception h2e) {
-                    ((Stream) stream).close(new StreamException(
+                } catch (org.apache.coyote.http2.Http2Exception h2e) {
+                    ((org.apache.coyote.http2.Stream) stream).close(new org.apache.coyote.http2.StreamException(
                             sm.getString("upgradeHandler.windowSizeTooBig", connectionId, stream.getIdAsString()),
                             h2e.getError(), stream.getIdAsInt()));
                 }
             }
-        } else if (setting == Setting.NO_RFC7540_PRIORITIES) {
+        } else if (setting == org.apache.coyote.http2.Setting.NO_RFC7540_PRIORITIES) {
             // This should not be changed after the initial setting
-            if (value != ConnectionSettingsBase.DEFAULT_NO_RFC7540_PRIORITIES) {
-                throw new ConnectionException(sm.getString("upgradeHandler.enableRfc7450Priorities", connectionId),
-                        Http2Error.PROTOCOL_ERROR);
+            if (value != org.apache.coyote.http2.ConnectionSettingsBase.DEFAULT_NO_RFC7540_PRIORITIES) {
+                throw new org.apache.coyote.http2.ConnectionException(sm.getString("upgradeHandler.enableRfc7450Priorities", connectionId),
+                        org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
             }
         } else {
             remoteSettings.set(setting, value);
@@ -1803,7 +1781,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     @Override
     public void pingReceive(byte[] payload, boolean ack) throws IOException {
         if (!ack) {
-            increaseOverheadCount(FrameType.PING);
+            increaseOverheadCount(org.apache.coyote.http2.FrameType.PING);
         }
         pingManager.receivePing(payload, ack);
     }
@@ -1811,8 +1789,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
     @Override
     public void goaway(int lastStreamId, long errorCode, String debugData) {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("upgradeHandler.goaway.debug", connectionId, Integer.toString(lastStreamId),
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("upgradeHandler.goaway.debug", connectionId, Integer.toString(lastStreamId),
                     Long.toHexString(errorCode), debugData));
         }
         close();
@@ -1820,7 +1798,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
 
 
     @Override
-    public void incrementWindowSize(int streamId, int increment) throws Http2Exception {
+    public void incrementWindowSize(int streamId, int increment) throws org.apache.coyote.http2.Http2Exception {
         // See also https://bz.apache.org/bugzilla/show_bug.cgi?id=63690
         // The buffering behaviour of some clients means that small data frames
         // are much more frequent (roughly 1 in 20) than expected. Some clients
@@ -1839,12 +1817,12 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
             // Check for small increments which are inefficient
             if (average < overheadThreshold) {
                 // The smaller the increment, the larger the overhead
-                increaseOverheadCount(FrameType.WINDOW_UPDATE, overheadThreshold / average);
+                increaseOverheadCount(org.apache.coyote.http2.FrameType.WINDOW_UPDATE, overheadThreshold / average);
             }
 
             incrementWindowSize(increment);
         } else {
-            AbstractNonZeroStream stream = getAbstractNonZeroStream(streamId, true);
+            org.apache.coyote.http2.AbstractNonZeroStream stream = getAbstractNonZeroStream(streamId, true);
 
             // Check for small increments which are inefficient
             if (average < overheadThreshold) {
@@ -1852,22 +1830,22 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 // against current demand
                 if (increment < stream.getConnectionAllocationRequested()) {
                     // The smaller the increment, the larger the overhead
-                    increaseOverheadCount(FrameType.WINDOW_UPDATE, overheadThreshold / average);
+                    increaseOverheadCount(org.apache.coyote.http2.FrameType.WINDOW_UPDATE, overheadThreshold / average);
                 }
             }
 
-            stream.checkState(FrameType.WINDOW_UPDATE);
+            stream.checkState(org.apache.coyote.http2.FrameType.WINDOW_UPDATE);
             stream.incrementWindowSize(increment);
         }
     }
 
 
     @Override
-    public void priorityUpdate(int prioritizedStreamID, Priority p) throws Http2Exception {
-        increaseOverheadCount(FrameType.PRIORITY_UPDATE);
-        AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(prioritizedStreamID, true);
-        if (abstractNonZeroStream instanceof Stream) {
-            Stream stream = (Stream) abstractNonZeroStream;
+    public void priorityUpdate(int prioritizedStreamID, Priority p) throws org.apache.coyote.http2.Http2Exception {
+        increaseOverheadCount(org.apache.coyote.http2.FrameType.PRIORITY_UPDATE);
+        org.apache.coyote.http2.AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(prioritizedStreamID, true);
+        if (abstractNonZeroStream instanceof org.apache.coyote.http2.Stream) {
+            org.apache.coyote.http2.Stream stream = (org.apache.coyote.http2.Stream) abstractNonZeroStream;
             stream.setUrgency(p.getUrgency());
             stream.setIncremental(p.getIncremental());
         }
@@ -1880,25 +1858,11 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    void replaceStream(AbstractNonZeroStream original, AbstractNonZeroStream replacement) {
-        AbstractNonZeroStream current = streams.get(original.getIdentifier());
-        /*
-         * Only replace the Stream once. No point replacing one RecycledStream instance with another.
-         *
-         * This method is called from both StreamProcessor and Http2UpgradeHandler which may be operating on the Stream
-         * concurrently. It is therefore expected that there will be duplicate calls to this method - primarily
-         * triggered by stream errors when processing incoming frames.
-         */
-        if (current instanceof Stream) {
-            if (log.isTraceEnabled()) {
-                log.trace(sm.getString("upgradeHandler.replace.first", getConnectionId(), original.getIdAsString()));
-            }
+    void replaceStream(org.apache.coyote.http2.AbstractNonZeroStream original, org.apache.coyote.http2.AbstractNonZeroStream replacement) {
+        org.apache.coyote.http2.AbstractNonZeroStream current = streams.get(original.getIdentifier());
+        // Only replace the stream if it currently uses the full implementation.
+        if (current instanceof org.apache.coyote.http2.Stream) {
             streams.put(original.getIdentifier(), replacement);
-        } else {
-            if (log.isTraceEnabled()) {
-                log.trace(
-                        sm.getString("upgradeHandler.replace.duplicate", getConnectionId(), original.getIdAsString()));
-            }
         }
     }
 
@@ -1936,7 +1900,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                     int sentSequence = ++sequence;
                     PingRecord pingRecord = new PingRecord(sentSequence, now);
                     inflightPings.add(pingRecord);
-                    ByteUtil.set31Bits(payload, 4, sentSequence);
+                    org.apache.coyote.http2.ByteUtil.set31Bits(payload, 4, sentSequence);
                     socketWrapper.write(true, PING, 0, PING.length);
                     socketWrapper.write(true, payload, 0, payload.length);
                     socketWrapper.flush(true);
@@ -1949,7 +1913,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         public void receivePing(byte[] payload, boolean ack) throws IOException {
             if (ack) {
                 // Extract the sequence from the payload
-                int receivedSequence = ByteUtil.get31Bits(payload, 4);
+                int receivedSequence = org.apache.coyote.http2.ByteUtil.get31Bits(payload, 4);
                 PingRecord pingRecord = inflightPings.poll();
                 while (pingRecord != null && pingRecord.getSequence() < receivedSequence) {
                     pingRecord = inflightPings.poll();
@@ -1964,8 +1928,8 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                         // the queue to 3 entries to use for the rolling average.
                         roundTripTimes.poll();
                     }
-                    if (log.isTraceEnabled()) {
-                        log.trace(sm.getString("pingManager.roundTripTime", connectionId, Long.valueOf(roundTripTime)));
+                    if (log.isDebugEnabled()) {
+                        log.debug(sm.getString("pingManager.roundTripTime", connectionId, Long.valueOf(roundTripTime)));
                     }
                 }
 

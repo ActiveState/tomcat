@@ -16,16 +16,6 @@
  */
 package org.apache.coyote.http2;
 
-import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.Reader;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-
-import javax.servlet.http.WebConnection;
-
 import org.apache.coyote.ProtocolException;
 import org.apache.coyote.http2.HpackDecoder.HeaderEmitter;
 import org.apache.juli.logging.Log;
@@ -33,6 +23,11 @@ import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.buf.ByteBufferUtils;
 import org.apache.tomcat.util.http.parser.Priority;
 import org.apache.tomcat.util.res.StringManager;
+
+import javax.servlet.http.WebConnection;
+import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 
 class Http2Parser {
 
@@ -46,8 +41,8 @@ class Http2Parser {
     private final Output output;
     private final byte[] frameHeaderBuffer = new byte[9];
 
-    private volatile HpackDecoder hpackDecoder;
-    private volatile ByteBuffer headerReadBuffer = ByteBuffer.allocate(Constants.DEFAULT_HEADER_READ_BUFFER_SIZE);
+    private volatile org.apache.coyote.http2.HpackDecoder hpackDecoder;
+    private volatile ByteBuffer headerReadBuffer = ByteBuffer.allocate(org.apache.coyote.http2.Constants.DEFAULT_HEADER_READ_BUFFER_SIZE);
     private volatile int headersCurrentStream = -1;
     private volatile boolean headersEndStream = false;
 
@@ -70,7 +65,7 @@ class Http2Parser {
      * @deprecated Unused. Will be removed in Tomcat 11 onwards.
      */
     @Deprecated
-    boolean readFrame(boolean block) throws Http2Exception, IOException {
+    boolean readFrame(boolean block) throws org.apache.coyote.http2.Http2Exception, IOException {
         return readFrame(block, null);
     }
 
@@ -83,26 +78,26 @@ class Http2Parser {
      *
      * @throws IOException If an IO error occurs while trying to read a frame
      */
-    boolean readFrame() throws Http2Exception, IOException {
+    boolean readFrame() throws org.apache.coyote.http2.Http2Exception, IOException {
         return readFrame(false, null);
     }
 
 
-    protected boolean readFrame(boolean block, FrameType expected) throws IOException, Http2Exception {
+    protected boolean readFrame(boolean block, org.apache.coyote.http2.FrameType expected) throws IOException, org.apache.coyote.http2.Http2Exception {
 
         if (!input.fill(block, frameHeaderBuffer)) {
             return false;
         }
 
-        int payloadSize = ByteUtil.getThreeBytes(frameHeaderBuffer, 0);
-        int frameTypeId = ByteUtil.getOneByte(frameHeaderBuffer, 3);
-        FrameType frameType = FrameType.valueOf(frameTypeId);
-        int flags = ByteUtil.getOneByte(frameHeaderBuffer, 4);
-        int streamId = ByteUtil.get31Bits(frameHeaderBuffer, 5);
+        int payloadSize = org.apache.coyote.http2.ByteUtil.getThreeBytes(frameHeaderBuffer, 0);
+        int frameTypeId = org.apache.coyote.http2.ByteUtil.getOneByte(frameHeaderBuffer, 3);
+        org.apache.coyote.http2.FrameType frameType = org.apache.coyote.http2.FrameType.valueOf(frameTypeId);
+        int flags = org.apache.coyote.http2.ByteUtil.getOneByte(frameHeaderBuffer, 4);
+        int streamId = org.apache.coyote.http2.ByteUtil.get31Bits(frameHeaderBuffer, 5);
 
         try {
             validateFrame(expected, frameType, streamId, flags, payloadSize);
-        } catch (StreamException se) {
+        } catch (org.apache.coyote.http2.StreamException se) {
             swallowPayload(streamId, frameTypeId, payloadSize, false, null);
             throw se;
         }
@@ -149,14 +144,14 @@ class Http2Parser {
     }
 
     protected void readDataFrame(int streamId, int flags, int payloadSize, ByteBuffer buffer)
-            throws Http2Exception, IOException {
+            throws org.apache.coyote.http2.Http2Exception, IOException {
         // Process the Stream
         int padLength = 0;
 
-        boolean endOfStream = Flags.isEndOfStream(flags);
+        boolean endOfStream = org.apache.coyote.http2.Flags.isEndOfStream(flags);
 
         int dataLength;
-        if (Flags.hasPadding(flags)) {
+        if (org.apache.coyote.http2.Flags.hasPadding(flags)) {
             if (buffer == null) {
                 byte[] b = new byte[1];
                 input.fill(true, b);
@@ -166,10 +161,10 @@ class Http2Parser {
             }
 
             if (padLength >= payloadSize) {
-                throw new ConnectionException(
+                throw new org.apache.coyote.http2.ConnectionException(
                         sm.getString("http2Parser.processFrame.tooMuchPadding", connectionId,
                                 Integer.toString(streamId), Integer.toString(padLength), Integer.toString(payloadSize)),
-                        Http2Error.PROTOCOL_ERROR);
+                        org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
             }
             // +1 is for the padding length byte we just read above
             dataLength = payloadSize - (padLength + 1);
@@ -177,24 +172,24 @@ class Http2Parser {
             dataLength = payloadSize;
         }
 
-        if (log.isTraceEnabled()) {
+        if (log.isDebugEnabled()) {
             String padding;
-            if (Flags.hasPadding(flags)) {
+            if (org.apache.coyote.http2.Flags.hasPadding(flags)) {
                 padding = Integer.toString(padLength);
             } else {
                 padding = "none";
             }
-            log.trace(sm.getString("http2Parser.processFrameData.lengths", connectionId, Integer.toString(streamId),
+            log.debug(sm.getString("http2Parser.processFrameData.lengths", connectionId, Integer.toString(streamId),
                     Integer.toString(dataLength), padding));
         }
 
         ByteBuffer dest = output.startRequestBodyFrame(streamId, payloadSize, endOfStream);
         if (dest == null) {
-            swallowPayload(streamId, FrameType.DATA.getId(), dataLength, false, buffer);
+            swallowPayload(streamId, org.apache.coyote.http2.FrameType.DATA.getId(), dataLength, false, buffer);
             // Process padding before sending any notifications in case padding
             // is invalid.
-            if (Flags.hasPadding(flags)) {
-                swallowPayload(streamId, FrameType.DATA.getId(), padLength, true, buffer);
+            if (org.apache.coyote.http2.Flags.hasPadding(flags)) {
+                swallowPayload(streamId, org.apache.coyote.http2.FrameType.DATA.getId(), padLength, true, buffer);
             }
             if (endOfStream) {
                 output.receivedEndOfStream(streamId);
@@ -203,12 +198,12 @@ class Http2Parser {
             synchronized (dest) {
                 if (dest.remaining() < payloadSize) {
                     // Client has sent more data than permitted by Window size
-                    swallowPayload(streamId, FrameType.DATA.getId(), dataLength, false, buffer);
-                    if (Flags.hasPadding(flags)) {
-                        swallowPayload(streamId, FrameType.DATA.getId(), padLength, true, buffer);
+                    swallowPayload(streamId, org.apache.coyote.http2.FrameType.DATA.getId(), dataLength, false, buffer);
+                    if (org.apache.coyote.http2.Flags.hasPadding(flags)) {
+                        swallowPayload(streamId, org.apache.coyote.http2.FrameType.DATA.getId(), padLength, true, buffer);
                     }
-                    throw new StreamException(sm.getString("http2Parser.processFrameData.window", connectionId),
-                            Http2Error.FLOW_CONTROL_ERROR, streamId);
+                    throw new org.apache.coyote.http2.StreamException(sm.getString("http2Parser.processFrameData.window", connectionId),
+                            org.apache.coyote.http2.Http2Error.FLOW_CONTROL_ERROR, streamId);
                 }
                 if (buffer == null) {
                     input.fill(true, dest, dataLength);
@@ -220,8 +215,8 @@ class Http2Parser {
                 }
                 // Process padding before sending any notifications in case
                 // padding is invalid.
-                if (Flags.hasPadding(flags)) {
-                    swallowPayload(streamId, FrameType.DATA.getId(), padLength, true, buffer);
+                if (org.apache.coyote.http2.Flags.hasPadding(flags)) {
+                    swallowPayload(streamId, org.apache.coyote.http2.FrameType.DATA.getId(), padLength, true, buffer);
                 }
                 if (endOfStream) {
                     output.receivedEndOfStream(streamId);
@@ -233,23 +228,23 @@ class Http2Parser {
 
 
     protected void readHeadersFrame(int streamId, int flags, int payloadSize, ByteBuffer buffer)
-            throws Http2Exception, IOException {
+            throws org.apache.coyote.http2.Http2Exception, IOException {
 
-        headersEndStream = Flags.isEndOfStream(flags);
+        headersEndStream = org.apache.coyote.http2.Flags.isEndOfStream(flags);
 
         if (hpackDecoder == null) {
             hpackDecoder = output.getHpackDecoder();
         }
         try {
             hpackDecoder.setHeaderEmitter(output.headersStart(streamId, headersEndStream));
-        } catch (StreamException se) {
-            swallowPayload(streamId, FrameType.HEADERS.getId(), payloadSize, false, buffer);
+        } catch (org.apache.coyote.http2.StreamException se) {
+            swallowPayload(streamId, org.apache.coyote.http2.FrameType.HEADERS.getId(), payloadSize, false, buffer);
             throw se;
         }
 
         int padLength = 0;
-        boolean padding = Flags.hasPadding(flags);
-        boolean priority = Flags.hasPriority(flags);
+        boolean padding = org.apache.coyote.http2.Flags.hasPadding(flags);
+        boolean priority = org.apache.coyote.http2.Flags.hasPriority(flags);
         int optionalLen = 0;
         if (padding) {
             optionalLen = 1;
@@ -265,11 +260,11 @@ class Http2Parser {
                 buffer.get(optional);
             }
             if (padding) {
-                padLength = ByteUtil.getOneByte(optional, 0);
+                padLength = org.apache.coyote.http2.ByteUtil.getOneByte(optional, 0);
                 if (padLength >= payloadSize) {
-                    throw new ConnectionException(sm.getString("http2Parser.processFrame.tooMuchPadding", connectionId,
+                    throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.processFrame.tooMuchPadding", connectionId,
                             Integer.toString(streamId), Integer.toString(padLength), Integer.toString(payloadSize)),
-                            Http2Error.PROTOCOL_ERROR);
+                            org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
                 }
             }
 
@@ -281,12 +276,9 @@ class Http2Parser {
 
         readHeaderPayload(streamId, payloadSize, buffer);
 
-        swallowPayload(streamId, FrameType.HEADERS.getId(), padLength, true, buffer);
+        swallowPayload(streamId, org.apache.coyote.http2.FrameType.HEADERS.getId(), padLength, true, buffer);
 
-        // Validate the headers so far
-        hpackDecoder.getHeaderEmitter().validateHeaders();
-
-        if (Flags.isEndOfHeaders(flags)) {
+        if (org.apache.coyote.http2.Flags.isEndOfHeaders(flags)) {
             onHeadersComplete(streamId);
         } else {
             headersCurrentStream = streamId;
@@ -297,16 +289,16 @@ class Http2Parser {
     protected void readPriorityFrame(int streamId, ByteBuffer buffer) throws IOException {
         // RFC 7450 priority frames are ignored. Still need to treat as overhead.
         try {
-            swallowPayload(streamId, FrameType.PRIORITY.getId(), 5, false, buffer);
-        } catch (ConnectionException e) {
+            swallowPayload(streamId, org.apache.coyote.http2.FrameType.PRIORITY.getId(), 5, false, buffer);
+        } catch (org.apache.coyote.http2.ConnectionException e) {
             // Will never happen because swallowPayload() is called with isPadding set
             // to false
         }
-        output.increaseOverheadCount(FrameType.PRIORITY);
+        output.increaseOverheadCount(org.apache.coyote.http2.FrameType.PRIORITY);
     }
 
 
-    protected void readRstFrame(int streamId, ByteBuffer buffer) throws Http2Exception, IOException {
+    protected void readRstFrame(int streamId, ByteBuffer buffer) throws org.apache.coyote.http2.Http2Exception, IOException {
         byte[] payload = new byte[4];
         if (buffer == null) {
             input.fill(true, payload);
@@ -314,18 +306,18 @@ class Http2Parser {
             buffer.get(payload);
         }
 
-        long errorCode = ByteUtil.getFourBytes(payload, 0);
+        long errorCode = org.apache.coyote.http2.ByteUtil.getFourBytes(payload, 0);
         output.reset(streamId, errorCode);
         headersCurrentStream = -1;
         headersEndStream = false;
     }
 
 
-    protected void readSettingsFrame(int flags, int payloadSize, ByteBuffer buffer) throws Http2Exception, IOException {
-        boolean ack = Flags.isAck(flags);
+    protected void readSettingsFrame(int flags, int payloadSize, ByteBuffer buffer) throws org.apache.coyote.http2.Http2Exception, IOException {
+        boolean ack = org.apache.coyote.http2.Flags.isAck(flags);
         if (payloadSize > 0 && ack) {
-            throw new ConnectionException(sm.getString("http2Parser.processFrameSettings.ackWithNonZeroPayload"),
-                    Http2Error.FRAME_SIZE_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.processFrameSettings.ackWithNonZeroPayload"),
+                    org.apache.coyote.http2.Http2Error.FRAME_SIZE_ERROR);
         }
 
         if (payloadSize == 0 && !ack) {
@@ -340,10 +332,10 @@ class Http2Parser {
                 } else {
                     buffer.get(setting);
                 }
-                int id = ByteUtil.getTwoBytes(setting, 0);
-                long value = ByteUtil.getFourBytes(setting, 2);
-                Setting key = Setting.valueOf(id);
-                if (key == Setting.UNKNOWN) {
+                int id = org.apache.coyote.http2.ByteUtil.getTwoBytes(setting, 0);
+                long value = org.apache.coyote.http2.ByteUtil.getFourBytes(setting, 2);
+                org.apache.coyote.http2.Setting key = org.apache.coyote.http2.Setting.valueOf(id);
+                if (key == org.apache.coyote.http2.Setting.UNKNOWN) {
                     log.warn(sm.getString("connectionSettings.unknown", connectionId, Integer.toString(id),
                             Long.toString(value)));
                 }
@@ -367,10 +359,10 @@ class Http2Parser {
      * @throws IOException    May be thrown by sub-classes that parse this frame
      */
     protected void readPushPromiseFrame(int streamId, int flags, int payloadSize, ByteBuffer buffer)
-            throws Http2Exception, IOException {
-        throw new ConnectionException(
+            throws org.apache.coyote.http2.Http2Exception, IOException {
+        throw new org.apache.coyote.http2.ConnectionException(
                 sm.getString("http2Parser.processFramePushPromise", connectionId, Integer.valueOf(streamId)),
-                Http2Error.PROTOCOL_ERROR);
+                org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
     }
 
 
@@ -382,7 +374,7 @@ class Http2Parser {
         } else {
             buffer.get(payload);
         }
-        output.pingReceive(payload, Flags.isAck(flags));
+        output.pingReceive(payload, org.apache.coyote.http2.Flags.isAck(flags));
     }
 
 
@@ -394,8 +386,8 @@ class Http2Parser {
             buffer.get(payload);
         }
 
-        int lastStreamId = ByteUtil.get31Bits(payload, 0);
-        long errorCode = ByteUtil.getFourBytes(payload, 4);
+        int lastStreamId = org.apache.coyote.http2.ByteUtil.get31Bits(payload, 0);
+        long errorCode = org.apache.coyote.http2.ByteUtil.getFourBytes(payload, 4);
         String debugData = null;
         if (payloadSize > 8) {
             debugData = new String(payload, 8, payloadSize - 8, StandardCharsets.UTF_8);
@@ -404,28 +396,28 @@ class Http2Parser {
     }
 
 
-    protected void readWindowUpdateFrame(int streamId, ByteBuffer buffer) throws Http2Exception, IOException {
+    protected void readWindowUpdateFrame(int streamId, ByteBuffer buffer) throws org.apache.coyote.http2.Http2Exception, IOException {
         byte[] payload = new byte[4];
         if (buffer == null) {
             input.fill(true, payload);
         } else {
             buffer.get(payload);
         }
-        int windowSizeIncrement = ByteUtil.get31Bits(payload, 0);
+        int windowSizeIncrement = org.apache.coyote.http2.ByteUtil.get31Bits(payload, 0);
 
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("http2Parser.processFrameWindowUpdate.debug", connectionId,
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("http2Parser.processFrameWindowUpdate.debug", connectionId,
                     Integer.toString(streamId), Integer.toString(windowSizeIncrement)));
         }
 
         // Validate the data
         if (windowSizeIncrement == 0) {
             if (streamId == 0) {
-                throw new ConnectionException(sm.getString("http2Parser.processFrameWindowUpdate.invalidIncrement",
-                        connectionId, Integer.toString(streamId)), Http2Error.PROTOCOL_ERROR);
+                throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.processFrameWindowUpdate.invalidIncrement",
+                        connectionId, Integer.toString(streamId)), org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
             } else {
-                throw new StreamException(sm.getString("http2Parser.processFrameWindowUpdate.invalidIncrement",
-                        connectionId, Integer.toString(streamId)), Http2Error.PROTOCOL_ERROR, streamId);
+                throw new org.apache.coyote.http2.StreamException(sm.getString("http2Parser.processFrameWindowUpdate.invalidIncrement",
+                        connectionId, Integer.toString(streamId)), org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR, streamId);
             }
         }
 
@@ -434,23 +426,20 @@ class Http2Parser {
 
 
     protected void readContinuationFrame(int streamId, int flags, int payloadSize, ByteBuffer buffer)
-            throws Http2Exception, IOException {
+            throws org.apache.coyote.http2.Http2Exception, IOException {
         if (headersCurrentStream == -1) {
             // No headers to continue
-            throw new ConnectionException(sm.getString("http2Parser.processFrameContinuation.notExpected", connectionId,
-                    Integer.toString(streamId)), Http2Error.PROTOCOL_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.processFrameContinuation.notExpected", connectionId,
+                    Integer.toString(streamId)), org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
         }
 
-        boolean endOfHeaders = Flags.isEndOfHeaders(flags);
+        boolean endOfHeaders = org.apache.coyote.http2.Flags.isEndOfHeaders(flags);
 
         // Used to detect abusive clients sending large numbers of small
         // continuation frames
         output.headersContinue(payloadSize, endOfHeaders);
 
         readHeaderPayload(streamId, payloadSize, buffer);
-
-        // Validate the headers so far
-        hpackDecoder.getHeaderEmitter().validateHeaders();
 
         if (endOfHeaders) {
             headersCurrentStream = -1;
@@ -459,7 +448,7 @@ class Http2Parser {
     }
 
 
-    protected void readPriorityUpdateFrame(int payloadSize, ByteBuffer buffer) throws Http2Exception, IOException {
+    protected void readPriorityUpdateFrame(int payloadSize, ByteBuffer buffer) throws org.apache.coyote.http2.Http2Exception, IOException {
         // Identify prioritized stream ID
         byte[] payload = new byte[payloadSize];
         if (buffer == null) {
@@ -468,11 +457,11 @@ class Http2Parser {
             buffer.get(payload);
         }
 
-        int prioritizedStreamID = ByteUtil.get31Bits(payload, 0);
+        int prioritizedStreamID = org.apache.coyote.http2.ByteUtil.get31Bits(payload, 0);
 
         if (prioritizedStreamID == 0) {
-            throw new ConnectionException(sm.getString("http2Parser.processFramePriorityUpdate.streamZero"),
-                    Http2Error.PROTOCOL_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.processFramePriorityUpdate.streamZero"),
+                    org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
         }
 
         ByteArrayInputStream bais = new ByteArrayInputStream(payload, 4, payloadSize - 4);
@@ -499,10 +488,10 @@ class Http2Parser {
 
 
     protected void readHeaderPayload(int streamId, int payloadSize, ByteBuffer buffer)
-            throws Http2Exception, IOException {
+            throws org.apache.coyote.http2.Http2Exception, IOException {
 
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("http2Parser.processFrameHeaders.payload", connectionId, Integer.valueOf(streamId),
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("http2Parser.processFrameHeaders.payload", connectionId, Integer.valueOf(streamId),
                     Integer.valueOf(payloadSize)));
         }
 
@@ -537,9 +526,9 @@ class Http2Parser {
             headerReadBuffer.flip();
             try {
                 hpackDecoder.decode(headerReadBuffer);
-            } catch (HpackException hpe) {
-                throw new ConnectionException(sm.getString("http2Parser.processFrameHeaders.decodingFailed"),
-                        Http2Error.COMPRESSION_ERROR, hpe);
+            } catch (org.apache.coyote.http2.HpackException hpe) {
+                throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.processFrameHeaders.decodingFailed"),
+                        org.apache.coyote.http2.Http2Error.COMPRESSION_ERROR, hpe);
             }
 
             // switches to write mode
@@ -547,23 +536,23 @@ class Http2Parser {
             remaining -= toRead;
 
             if (hpackDecoder.isHeaderCountExceeded()) {
-                StreamException headerException = new StreamException(
+                org.apache.coyote.http2.StreamException headerException = new org.apache.coyote.http2.StreamException(
                         sm.getString("http2Parser.headerLimitCount", connectionId, Integer.valueOf(streamId)),
-                        Http2Error.ENHANCE_YOUR_CALM, streamId);
+                        org.apache.coyote.http2.Http2Error.ENHANCE_YOUR_CALM, streamId);
                 hpackDecoder.getHeaderEmitter().setHeaderException(headerException);
             }
 
             if (hpackDecoder.isHeaderSizeExceeded(headerReadBuffer.position())) {
-                StreamException headerException = new StreamException(
+                org.apache.coyote.http2.StreamException headerException = new org.apache.coyote.http2.StreamException(
                         sm.getString("http2Parser.headerLimitSize", connectionId, Integer.valueOf(streamId)),
-                        Http2Error.ENHANCE_YOUR_CALM, streamId);
+                        org.apache.coyote.http2.Http2Error.ENHANCE_YOUR_CALM, streamId);
                 hpackDecoder.getHeaderEmitter().setHeaderException(headerException);
             }
 
             if (hpackDecoder.isHeaderSwallowSizeExceeded(headerReadBuffer.position())) {
-                throw new ConnectionException(
+                throw new org.apache.coyote.http2.ConnectionException(
                         sm.getString("http2Parser.headerLimitSize", connectionId, Integer.valueOf(streamId)),
-                        Http2Error.ENHANCE_YOUR_CALM);
+                        org.apache.coyote.http2.Http2Error.ENHANCE_YOUR_CALM);
             }
         }
     }
@@ -573,7 +562,7 @@ class Http2Parser {
             throws IOException {
         try {
             swallowPayload(streamId, frameTypeId, payloadSize, false, buffer);
-        } catch (ConnectionException e) {
+        } catch (org.apache.coyote.http2.ConnectionException e) {
             // Will never happen because swallowPayload() is called with isPadding set
             // to false
         } finally {
@@ -595,9 +584,9 @@ class Http2Parser {
      * @throws ConnectionException If the swallowed bytes are expected to have a value of zero but do not
      */
     protected void swallowPayload(int streamId, int frameTypeId, int len, boolean isPadding, ByteBuffer byteBuffer)
-            throws IOException, ConnectionException {
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("http2Parser.swallow.debug", connectionId, Integer.toString(streamId),
+            throws IOException, org.apache.coyote.http2.ConnectionException {
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("http2Parser.swallow.debug", connectionId, Integer.toString(streamId),
                     Integer.toString(len)));
         }
         try {
@@ -622,8 +611,8 @@ class Http2Parser {
                         // side bug.
                         for (int i = 0; i < thisTime; i++) {
                             if (buffer[i] != 0) {
-                                throw new ConnectionException(sm.getString("http2Parser.nonZeroPadding", connectionId,
-                                        Integer.toString(streamId)), Http2Error.PROTOCOL_ERROR);
+                                throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.nonZeroPadding", connectionId,
+                                        Integer.toString(streamId)), org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR);
                             }
                         }
                     }
@@ -631,7 +620,7 @@ class Http2Parser {
                 }
             }
         } finally {
-            if (FrameType.DATA.getIdByte() == frameTypeId) {
+            if (org.apache.coyote.http2.FrameType.DATA.getIdByte() == frameTypeId) {
                 if (isPadding) {
                     // Need to add 1 for the padding length bytes that was also
                     // part of the payload.
@@ -645,18 +634,17 @@ class Http2Parser {
     }
 
 
-    protected void onHeadersComplete(int streamId) throws Http2Exception {
+    protected void onHeadersComplete(int streamId) throws org.apache.coyote.http2.Http2Exception {
         // Any left over data is a compression error
         if (headerReadBuffer.position() > 0) {
-            throw new ConnectionException(sm.getString("http2Parser.processFrameHeaders.decodingDataLeft"),
-                    Http2Error.COMPRESSION_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.processFrameHeaders.decodingDataLeft"),
+                    org.apache.coyote.http2.Http2Error.COMPRESSION_ERROR);
         }
 
-        /*
-         * Clear the reference to the stream in the HPack decoder now that the headers have been processed so that the
-         * HPack decoder does not retain a reference to this stream. This aids GC.
-         */
-        hpackDecoder.clearHeaderEmitter();
+        // Delay validation (and triggering any exception) until this point
+        // since all the headers still have to be read if a StreamException is
+        // going to be thrown.
+        hpackDecoder.getHeaderEmitter().validateHeaders();
 
         synchronized (output) {
             output.headersEnd(streamId, headersEndStream);
@@ -667,8 +655,8 @@ class Http2Parser {
         }
 
         // Reset size for new request if the buffer was previously expanded
-        if (headerReadBuffer.capacity() > Constants.DEFAULT_HEADER_READ_BUFFER_SIZE) {
-            headerReadBuffer = ByteBuffer.allocate(Constants.DEFAULT_HEADER_READ_BUFFER_SIZE);
+        if (headerReadBuffer.capacity() > org.apache.coyote.http2.Constants.DEFAULT_HEADER_READ_BUFFER_SIZE) {
+            headerReadBuffer = ByteBuffer.allocate(org.apache.coyote.http2.Constants.DEFAULT_HEADER_READ_BUFFER_SIZE);
         }
     }
 
@@ -678,37 +666,37 @@ class Http2Parser {
      * validation should be performed in the appropriate readXxxFrame() method. For validation applicable to some but
      * not all frame types, use your judgement.
      */
-    protected void validateFrame(FrameType expected, FrameType frameType, int streamId, int flags, int payloadSize)
-            throws Http2Exception {
+    protected void validateFrame(org.apache.coyote.http2.FrameType expected, org.apache.coyote.http2.FrameType frameType, int streamId, int flags, int payloadSize)
+            throws org.apache.coyote.http2.Http2Exception {
 
-        if (log.isTraceEnabled()) {
-            log.trace(sm.getString("http2Parser.processFrame", connectionId, Integer.toString(streamId), frameType,
+        if (log.isDebugEnabled()) {
+            log.debug(sm.getString("http2Parser.processFrame", connectionId, Integer.toString(streamId), frameType,
                     Integer.toString(flags), Integer.toString(payloadSize)));
         }
 
         if (expected != null && frameType != expected) {
-            throw new StreamException(sm.getString("http2Parser.processFrame.unexpectedType", expected, frameType),
-                    Http2Error.PROTOCOL_ERROR, streamId);
+            throw new org.apache.coyote.http2.StreamException(sm.getString("http2Parser.processFrame.unexpectedType", expected, frameType),
+                    org.apache.coyote.http2.Http2Error.PROTOCOL_ERROR, streamId);
         }
 
         int maxFrameSize = input.getMaxFrameSize();
         if (payloadSize > maxFrameSize) {
-            throw new ConnectionException(sm.getString("http2Parser.payloadTooBig", Integer.toString(payloadSize),
-                    Integer.toString(maxFrameSize)), Http2Error.FRAME_SIZE_ERROR);
+            throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.payloadTooBig", Integer.toString(payloadSize),
+                    Integer.toString(maxFrameSize)), org.apache.coyote.http2.Http2Error.FRAME_SIZE_ERROR);
         }
 
         if (headersCurrentStream != -1) {
             if (headersCurrentStream != streamId) {
-                throw new ConnectionException(
+                throw new org.apache.coyote.http2.ConnectionException(
                         sm.getString("http2Parser.headers.wrongStream", connectionId,
                                 Integer.toString(headersCurrentStream), Integer.toString(streamId)),
-                        Http2Error.COMPRESSION_ERROR);
+                        org.apache.coyote.http2.Http2Error.COMPRESSION_ERROR);
             }
-            if (frameType == FrameType.RST) {
+            if (frameType == org.apache.coyote.http2.FrameType.RST) {
                 // NO-OP: RST is OK here
-            } else if (frameType != FrameType.CONTINUATION) {
-                throw new ConnectionException(sm.getString("http2Parser.headers.wrongFrameType", connectionId,
-                        Integer.toString(headersCurrentStream), frameType), Http2Error.COMPRESSION_ERROR);
+            } else if (frameType != org.apache.coyote.http2.FrameType.CONTINUATION) {
+                throw new org.apache.coyote.http2.ConnectionException(sm.getString("http2Parser.headers.wrongFrameType", connectionId,
+                        Integer.toString(headersCurrentStream), frameType), org.apache.coyote.http2.Http2Error.COMPRESSION_ERROR);
             }
         }
 
@@ -722,7 +710,7 @@ class Http2Parser {
      * @param webConnection The connection
      * @param stream        The current stream
      */
-    void readConnectionPreface(WebConnection webConnection, Stream stream) throws Http2Exception {
+    void readConnectionPreface(WebConnection webConnection, org.apache.coyote.http2.Stream stream) throws org.apache.coyote.http2.Http2Exception {
         byte[] data = new byte[CLIENT_PREFACE_START.length];
         try {
             input.fill(true, data);
@@ -734,7 +722,7 @@ class Http2Parser {
             }
 
             // Must always be followed by a settings frame
-            readFrame(true, FrameType.SETTINGS);
+            readFrame(true, org.apache.coyote.http2.FrameType.SETTINGS);
         } catch (IOException ioe) {
             throw new ProtocolException(sm.getString("http2Parser.preface.io"), ioe);
         }
@@ -782,14 +770,14 @@ class Http2Parser {
      */
     interface Output {
 
-        HpackDecoder getHpackDecoder();
+        org.apache.coyote.http2.HpackDecoder getHpackDecoder();
 
         // Data frames
-        ByteBuffer startRequestBodyFrame(int streamId, int payloadSize, boolean endOfStream) throws Http2Exception;
+        ByteBuffer startRequestBodyFrame(int streamId, int payloadSize, boolean endOfStream) throws org.apache.coyote.http2.Http2Exception;
 
-        void endRequestBodyFrame(int streamId, int dataLength) throws Http2Exception, IOException;
+        void endRequestBodyFrame(int streamId, int dataLength) throws org.apache.coyote.http2.Http2Exception, IOException;
 
-        void receivedEndOfStream(int streamId) throws ConnectionException;
+        void receivedEndOfStream(int streamId) throws org.apache.coyote.http2.ConnectionException;
 
         /**
          * Notification triggered when the parser swallows some or all of a DATA frame payload without writing it to the
@@ -802,20 +790,20 @@ class Http2Parser {
          * @throws IOException         If an I/O occurred while swallowing the payload
          */
         void onSwallowedDataFramePayload(int streamId, int swallowedDataBytesCount)
-                throws ConnectionException, IOException;
+                throws org.apache.coyote.http2.ConnectionException, IOException;
 
         // Header frames
-        HeaderEmitter headersStart(int streamId, boolean headersEndStream) throws Http2Exception, IOException;
+        HeaderEmitter headersStart(int streamId, boolean headersEndStream) throws org.apache.coyote.http2.Http2Exception, IOException;
 
         void headersContinue(int payloadSize, boolean endOfHeaders);
 
-        void headersEnd(int streamId, boolean endOfStream) throws Http2Exception;
+        void headersEnd(int streamId, boolean endOfStream) throws org.apache.coyote.http2.Http2Exception;
 
         // Reset frames
-        void reset(int streamId, long errorCode) throws Http2Exception;
+        void reset(int streamId, long errorCode) throws org.apache.coyote.http2.Http2Exception;
 
         // Settings frames
-        void setting(Setting setting, long value) throws ConnectionException;
+        void setting(org.apache.coyote.http2.Setting setting, long value) throws org.apache.coyote.http2.ConnectionException;
 
         void settingsEnd(boolean ack) throws IOException;
 
@@ -826,10 +814,10 @@ class Http2Parser {
         void goaway(int lastStreamId, long errorCode, String debugData);
 
         // Window size
-        void incrementWindowSize(int streamId, int increment) throws Http2Exception;
+        void incrementWindowSize(int streamId, int increment) throws org.apache.coyote.http2.Http2Exception;
 
         // Priority update
-        void priorityUpdate(int prioritizedStreamID, Priority p) throws Http2Exception;
+        void priorityUpdate(int prioritizedStreamID, Priority p) throws org.apache.coyote.http2.Http2Exception;
 
         /**
          * Notification triggered when the parser swallows the payload of an unknown frame.
@@ -843,6 +831,6 @@ class Http2Parser {
          */
         void onSwallowedUnknownFrame(int streamId, int frameTypeId, int flags, int size) throws IOException;
 
-        void increaseOverheadCount(FrameType frameType);
+        void increaseOverheadCount(org.apache.coyote.http2.FrameType frameType);
     }
 }
