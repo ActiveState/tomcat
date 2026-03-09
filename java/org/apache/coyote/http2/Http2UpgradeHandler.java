@@ -55,6 +55,28 @@ import org.apache.tomcat.util.net.SendfileState;
 import org.apache.tomcat.util.net.SocketEvent;
 import org.apache.tomcat.util.net.SocketWrapperBase;
 import org.apache.tomcat.util.res.StringManager;
+import org.apache.coyote.http2.AbstractNonZeroStream;
+import org.apache.coyote.http2.AbstractStream;
+import org.apache.coyote.http2.ConnectionSettingsRemote;
+import org.apache.coyote.http2.ConnectionSettingsLocal;
+import org.apache.coyote.http2.ConnectionSettingsBase;
+import org.apache.coyote.http2.FrameType;
+import org.apache.coyote.http2.Http2Error;
+import org.apache.coyote.http2.Http2Exception;
+import org.apache.coyote.http2.Stream;
+import org.apache.coyote.http2.StreamException;
+import org.apache.coyote.http2.StreamProcessor;
+import org.apache.coyote.http2.StreamRunnable;
+import org.apache.coyote.http2.HeaderSink;
+import org.apache.coyote.http2.Http2Protocol;
+import org.apache.coyote.http2.HpackDecoder;
+import org.apache.coyote.http2.HpackEncoder;
+import org.apache.coyote.http2.Http2Parser;
+import org.apache.coyote.http2.ByteUtil;
+import org.apache.coyote.http2.Setting;
+import org.apache.coyote.http2.ConnectionException;
+import org.apache.coyote.http2.Constants;
+import org.apache.coyote.http2.SendfileData;
 
 /**
  * This represents an HTTP/2 connection from a client to Tomcat. It is designed
