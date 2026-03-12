@@ -288,13 +288,13 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         processStreamOnContainerThread(streamProcessor, SocketEvent.OPEN_READ);
     }
 
-
     protected void decrementActiveRemoteStreamCount(Stream stream) {
-        if (stream != null) {
-            setConnectionTimeoutForStreamCount(stream.decrementAndGetActiveRemoteStreamCount());
-        }
+        setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
     }
 
+    protected void decrementActiveRemoteStreamCount() {
+        setConnectionTimeoutForStreamCount(activeRemoteStreamCount.decrementAndGet());
+    }
 
     void processStreamOnContainerThread(StreamProcessor streamProcessor, SocketEvent event) {
         StreamRunnable streamRunnable = new StreamRunnable(streamProcessor, event);
@@ -1551,7 +1551,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         AbstractNonZeroStream abstractNonZeroStream = getAbstractNonZeroStream(streamId, true);
         abstractNonZeroStream.checkState(FrameType.DATA);
         abstractNonZeroStream.receivedData(payloadSize);
-        ByteBuffer result = abstractNonZeroStream.getInputByteBuffer(true);
+        ByteBuffer result = abstractNonZeroStream.getInputByteBuffer();
 
         if (log.isTraceEnabled()) {
             log.trace(sm.getString("upgradeHandler.startRequestBodyFrame.result", getConnectionId(),
