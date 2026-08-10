@@ -17,10 +17,14 @@
 package org.apache.catalina.servlets;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+
+import javax.servlet.ServletContext;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -168,6 +172,62 @@ public class TestDefaultServletPut extends TomcatBaseTest {
 
         Assert.assertEquals(200,  rc);
         Assert.assertEquals(expectedEndText, responseBody.toString());
+    }
+
+
+    /*
+     * CVE-2025-24813: the partial PUT temp file used to be named by replacing
+     * '/' with '.' in the request path, so a request to /sub/dir/evil.session
+     * left a predictable ".sub.dir.evil.session" file sitting in the temp dir
+     * (and only ever cleaned up via deleteOnExit(), i.e. never during normal
+     * operation). Verify the temp file name is no longer path-derived and is
+     * actually removed once the request has finished.
+     */
+    @Test
+    public void testPartialPutDoesNotUsePredictableTempFileName() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+        Context ctxt = tomcat.addContext("", tempDocBase.getAbsolutePath());
+
+        Wrapper w = Tomcat.addServlet(ctxt, "default", DefaultServlet.class.getName());
+        w.addInitParameter("readonly", "false");
+        w.addInitParameter("allowPartialPut", "true");
+        ctxt.addServletMappingDecoded("/", "default");
+
+        tomcat.start();
+        ctxt.getResources().setCachingAllowed(false);
+
+        File tempDir = (File) ctxt.getServletContext().getAttribute(ServletContext.TEMPDIR);
+
+        String requestPath = "evil.session";
+        String predictableName = "." + requestPath.replace('/', '.');
+
+        byte[] payload = new byte[1024];
+        Arrays.fill(payload, (byte) 'A');
+
+        PutClient putClient = new PutClient(getPort());
+        putClient.setRequest(new String[] {
+                "PUT /" + requestPath + " HTTP/1.1" + CRLF +
+                "Host: localhost:" + getPort() + CRLF +
+                "Content-Range: bytes=0-" + (payload.length - 1) + "/" + payload.length + CRLF +
+                "Content-Length: " + payload.length + CRLF +
+                CRLF +
+                new String(payload, StandardCharsets.ISO_8859_1)
+        });
+        putClient.connect();
+        putClient.processRequest(false);
+        Assert.assertTrue(putClient.isResponse201());
+        putClient.disconnect();
+
+        File predictable = new File(tempDir, predictableName);
+        Assert.assertFalse(
+                "Predictable, path-derived temp file was left behind - CVE-2025-24813 regression: "
+                        + predictable.getAbsolutePath(),
+                predictable.exists());
+
+        File[] leftoverPutParts = tempDir.listFiles((dir, name) -> name.startsWith("put-part-"));
+        Assert.assertTrue(
+                "Partial PUT temp file was not cleaned up after the request completed",
+                leftoverPutParts == null || leftoverPutParts.length == 0);
     }
 
 
